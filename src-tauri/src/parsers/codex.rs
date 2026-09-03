@@ -179,13 +179,17 @@ impl CodexParser {
     /// Every session id that still has a rollout under `sessions/` or
     /// `archived_sessions/`. Used to prune DB rows whose agent-side files are
     /// gone without opening each file.
-    pub(crate) fn present_session_ids(&self) -> HashSet<String> {
+    ///
+    /// Returns `Err` when the walk hits an I/O / permission error: callers must
+    /// treat that as "disk presence unknown" and **skip** prune, never as an
+    /// empty set (an empty set means "successfully observed zero rollouts").
+    pub(crate) fn present_session_ids(&self) -> Result<HashSet<String>, std::io::Error> {
         let mut ids = HashSet::new();
-        self.collect_session_ids_from_dir(&self.base_dir, &mut ids);
+        self.collect_session_ids_from_dir(&self.base_dir, &mut ids)?;
         if let Some(home) = self.base_dir.parent() {
-            self.collect_session_ids_from_dir(&home.join("archived_sessions"), &mut ids);
+            self.collect_session_ids_from_dir(&home.join("archived_sessions"), &mut ids)?;
         }
-        ids
+        Ok(ids)
     }
 
     fn find_rollout_in_dir(
@@ -211,11 +215,23 @@ impl CodexParser {
             })
     }
 
-    fn collect_session_ids_from_dir(&self, dir: &Path, ids: &mut HashSet<String>) {
+    fn collect_session_ids_from_dir(
+        &self,
+        dir: &Path,
+        ids: &mut HashSet<String>,
+    ) -> Result<(), std::io::Error> {
         if !dir.exists() {
-            return;
+            return Ok(());
         }
-        for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+        for entry in WalkDir::new(dir).into_iter() {
+            let entry = entry.map_err(|e| {
+                std::io::Error::new(
+                    e.io_error()
+                        .map(|io| io.kind())
+                        .unwrap_or(std::io::ErrorKind::Other),
+                    e.to_string(),
+                )
+            })?;
             let path = entry.path();
             let ext = path.extension().and_then(|e| e.to_str());
             if ext != Some("jsonl") && ext != Some("json") {
@@ -226,6 +242,7 @@ impl CodexParser {
                 ids.insert(id);
             }
         }
+        Ok(())
     }
 
     /// Load Codex's append-only session title index. The transcript remains the
@@ -5648,6 +5665,38 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
 
 #[cfg(test)]
 mod tests {
+
+    /// An empty, readable sessions dir is a successful empty presence set —
+    /// callers may prune. An unreadable dir must return Err so callers skip
+    /// prune instead of treating the failure as "zero rollouts".
+    #[test]
+    fn present_session_ids_distinguishes_empty_from_unreadable() {
+        let temp_dir = tempfile::tempdir().expect("temp");
+        let sessions_dir = temp_dir.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions");
+        let parser = CodexParser::with_base_dir(sessions_dir.clone());
+        assert!(
+            parser
+                .present_session_ids()
+                .expect("readable empty dir")
+                .is_empty()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o000))
+                .expect("chmod");
+            let result = CodexParser::with_base_dir(sessions_dir.clone()).present_session_ids();
+            // Restore so tempfile cleanup can remove the dir.
+            fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o755))
+                .expect("chmod restore");
+            assert!(
+                result.is_err(),
+                "unreadable sessions dir must not look like an empty successful walk"
+            );
+        }
+    }
 
     /// codex-acp 1.8.0 forks BY REFERENCE: the child's rollout carries no
     /// history, only `forked_from_id` + `forked_from_ordinal_exclusive`. Read

@@ -468,17 +468,31 @@ pub(crate) async fn prune_missing_imported_sessions(
 /// session that still has a rollout under `sessions/` or `archived_sessions/`.
 /// Archived sessions are absent from the normal Codex parser listing but must
 /// not be pruned — they reopen via `codex unarchive`.
+///
+/// Returns `None` when the Codex disk walk fails: callers must skip prune
+/// entirely rather than treat "unknown" as "empty".
 pub(crate) fn present_keys_with_codex_disk(
     summaries: &[(AgentType, ConversationSummary)],
-) -> std::collections::HashSet<(String, String)> {
+) -> Option<std::collections::HashSet<(String, String)>> {
     let mut present: std::collections::HashSet<(String, String)> = summaries
         .iter()
         .map(|(at, s)| (agent_type_db_str(at), s.id.clone()))
         .collect();
-    for id in crate::parsers::codex::CodexParser::new().present_session_ids() {
-        present.insert((agent_type_db_str(&AgentType::Codex), id));
+    match crate::parsers::codex::CodexParser::new().present_session_ids() {
+        Ok(ids) => {
+            for id in ids {
+                present.insert((agent_type_db_str(&AgentType::Codex), id));
+            }
+            Some(present)
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "codex disk presence walk failed; skipping prune of missing imported sessions"
+            );
+            None
+        }
     }
-    present
 }
 
 /// Insert a brand-new conversation, or — when it already exists — refresh it in

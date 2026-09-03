@@ -40,25 +40,25 @@ pub(crate) async fn list_all_conversations_core(
     chat_channel_manager: &crate::chat_channel::manager::ChatChannelManager,
     options: ListAllConversationsOptions,
 ) -> Result<Vec<DbConversationSummary>, AppCommandError> {
-    let (codex_titles, present_codex) = match tokio::task::spawn_blocking(|| {
+    let scan = match tokio::task::spawn_blocking(|| {
         let parser = CodexParser::new();
-        (parser.load_thread_name_index(), parser.present_session_ids())
+        let titles = parser.load_thread_name_index();
+        let present = parser.present_session_ids();
+        (titles, present)
     })
     .await
     {
-        Ok(pair) => pair,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "conversation list: failed to load Codex session index; continuing without refresh/prune"
-            );
-            (HashMap::new(), HashSet::new())
-        }
+        Ok((titles, present)) => Ok((titles, present)),
+        Err(error) => Err(error.to_string()),
     };
+    let (codex_titles, present_codex) = resolve_codex_list_scan(scan);
     // Drop sidebar ghosts whose Codex rollout is gone. Runs before `list_all`
     // so this response already excludes them; Deleted events keep other
-    // windows/clients in sync without a second refetch.
-    prune_missing_codex_sessions(conn, emitter, &present_codex).await;
+    // windows/clients in sync without a second refetch. Skip when the disk
+    // walk failed — an empty set means "zero rollouts", not "unknown".
+    if let Some(present) = present_codex.as_ref() {
+        prune_missing_codex_sessions(conn, emitter, present).await;
+    }
     list_all_conversations_core_with_codex_titles(
         conn,
         emitter,
@@ -67,6 +67,33 @@ pub(crate) async fn list_all_conversations_core(
         &codex_titles,
     )
     .await
+}
+
+/// Map the blocking Codex title+presence scan into list_all inputs.
+///
+/// `Ok((_, Err(_)))` and join failures both yield `present = None` so prune is
+/// skipped; only a successful walk (including a successful empty set) enables
+/// prune.
+fn resolve_codex_list_scan(
+    scan: Result<(HashMap<String, String>, Result<HashSet<String>, std::io::Error>), String>,
+) -> (HashMap<String, String>, Option<HashSet<String>>) {
+    match scan {
+        Ok((titles, Ok(present))) => (titles, Some(present)),
+        Ok((titles, Err(error))) => {
+            tracing::warn!(
+                error = %error,
+                "conversation list: Codex rollout walk failed; continuing without prune"
+            );
+            (titles, None)
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "conversation list: failed to load Codex session index; continuing without refresh/prune"
+            );
+            (HashMap::new(), None)
+        }
+    }
 }
 
 /// Soft-delete live Codex conversations whose rollout is no longer under
@@ -94,7 +121,27 @@ async fn prune_missing_codex_sessions(
         .collect();
     let pruned =
         import_service::prune_missing_imported_sessions(conn, &rows, &present).await;
-    for conversation_id in pruned {
+    finalize_pruned_conversations(emitter, conn, &pruned).await;
+}
+
+/// Broadcast deletion and run the same post-delete cleanups as a user delete
+/// (tabs, canvas, chat-folder). The row is already soft-deleted by
+/// [`import_service::prune_missing_imported_sessions`].
+async fn finalize_pruned_conversations(
+    emitter: &EventEmitter,
+    conn: &sea_orm::DatabaseConnection,
+    pruned: &[i32],
+) {
+    use sea_orm::EntityTrait;
+
+    for &conversation_id in pruned {
+        // Capture folder_id from the soft-deleted row (get_by_id filters those out).
+        let folder_id = conversation::Entity::find_by_id(conversation_id)
+            .one(conn)
+            .await
+            .ok()
+            .flatten()
+            .map(|row| row.folder_id);
         emit_conversation_deleted(emitter, conversation_id);
         cleanup_tabs_for_deleted_conversation(emitter, conn, conversation_id).await;
         crate::commands::canvas::cleanup_canvas_for_deleted_conversation(
@@ -103,6 +150,9 @@ async fn prune_missing_codex_sessions(
             conversation_id,
         )
         .await;
+        if let Some(folder_id) = folder_id {
+            cleanup_chat_folder_for_deleted_conversation(conn, folder_id).await;
+        }
     }
 }
 
@@ -764,18 +814,12 @@ async fn scan_importable_sessions_from_summaries(
     // Soft-delete rows whose agent-side files disappeared since import. Without
     // this the sidebar keeps showing ghosts that fail to open. Cleanup runs the
     // same funnel as a user delete so tabs/canvas/chat-folders converge.
-    let present = import_service::present_keys_with_codex_disk(&summaries);
-    let pruned =
-        import_service::prune_missing_imported_sessions(conn, &conv_rows, &present).await;
-    for conversation_id in pruned {
-        emit_conversation_deleted(emitter, conversation_id);
-        cleanup_tabs_for_deleted_conversation(emitter, conn, conversation_id).await;
-        crate::commands::canvas::cleanup_canvas_for_deleted_conversation(
-            emitter,
-            conn,
-            conversation_id,
-        )
-        .await;
+    // Skip entirely when the Codex disk walk failed — never treat "unknown"
+    // as "empty".
+    if let Some(present) = import_service::present_keys_with_codex_disk(&summaries) {
+        let pruned =
+            import_service::prune_missing_imported_sessions(conn, &conv_rows, &present).await;
+        finalize_pruned_conversations(emitter, conn, &pruned).await;
     }
 
     let folder_rows = load_folder_rows(conn).await?;
@@ -4103,6 +4147,30 @@ mod tests {
         assert_eq!(event.channel, CONVERSATION_CHANGED_EVENT);
         assert_eq!(event.payload["kind"], "deleted");
         assert_eq!(event.payload["id"], row.id);
+    }
+
+    #[test]
+    fn resolve_codex_list_scan_skips_prune_when_walk_or_join_fails() {
+        let titles = HashMap::from([("s".into(), "t".into())]);
+        let (got_titles, present) = resolve_codex_list_scan(Ok((
+            titles.clone(),
+            Err(std::io::Error::other("permission denied")),
+        )));
+        assert_eq!(got_titles, titles);
+        assert!(
+            present.is_none(),
+            "a failed walk must disable prune, not pass an empty set"
+        );
+
+        let (_, present) = resolve_codex_list_scan(Err("join failed".into()));
+        assert!(present.is_none());
+
+        let (_, present) = resolve_codex_list_scan(Ok((HashMap::new(), Ok(HashSet::new()))));
+        assert_eq!(
+            present,
+            Some(HashSet::new()),
+            "a successful empty walk still enables prune"
+        );
     }
 
     /// The channel half of a title notification must not be on the caller's
