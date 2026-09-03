@@ -173,17 +173,59 @@ impl CodexParser {
         if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.contains("..") {
             return None;
         }
-        WalkDir::new(&self.base_dir)
+        self.find_rollout_in_dir(&self.base_dir, session_id)
+    }
+
+    /// Every session id that still has a rollout under `sessions/` or
+    /// `archived_sessions/`. Used to prune DB rows whose agent-side files are
+    /// gone without opening each file.
+    pub(crate) fn present_session_ids(&self) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        self.collect_session_ids_from_dir(&self.base_dir, &mut ids);
+        if let Some(home) = self.base_dir.parent() {
+            self.collect_session_ids_from_dir(&home.join("archived_sessions"), &mut ids);
+        }
+        ids
+    }
+
+    fn find_rollout_in_dir(
+        &self,
+        dir: &Path,
+        session_id: &str,
+    ) -> Option<std::path::PathBuf> {
+        if !dir.exists() {
+            return None;
+        }
+        WalkDir::new(dir)
             .into_iter()
             .filter_map(Result::ok)
             .map(|entry| entry.path().to_path_buf())
             .find(|path| {
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                let ext = path.extension().and_then(|e| e.to_str());
+                // Codex historically wrote `.json`; current rollouts are `.jsonl`.
+                if ext != Some("jsonl") && ext != Some("json") {
                     return false;
                 }
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 name.starts_with("rollout-") && name.contains(session_id)
             })
+    }
+
+    fn collect_session_ids_from_dir(&self, dir: &Path, ids: &mut HashSet<String>) {
+        if !dir.exists() {
+            return;
+        }
+        for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str());
+            if ext != Some("jsonl") && ext != Some("json") {
+                continue;
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if let Some(id) = session_id_from_rollout_filename(&name) {
+                ids.insert(id);
+            }
+        }
     }
 
     /// Load Codex's append-only session title index. The transcript remains the
@@ -739,6 +781,35 @@ impl AgentParser for CodexParser {
             conversation_id.to_string(),
         ))
     }
+}
+
+/// Extract the session id embedded in a Codex rollout filename
+/// (`rollout-<timestamp>-<session-id>.jsonl`). The id is the trailing UUID.
+fn session_id_from_rollout_filename(name: &str) -> Option<String> {
+    let stem = name
+        .strip_prefix("rollout-")?
+        .strip_suffix(".jsonl")
+        .or_else(|| name.strip_prefix("rollout-")?.strip_suffix(".json"))?;
+    // UUID is 8-4-4-4-12 (36 chars with hyphens) at the end of the stem.
+    if stem.len() < 36 {
+        return None;
+    }
+    let candidate = &stem[stem.len() - 36..];
+    let mut parts = candidate.split('-');
+    let looks_like_uuid = matches!(
+        (
+            parts.next().map(|p| p.len()),
+            parts.next().map(|p| p.len()),
+            parts.next().map(|p| p.len()),
+            parts.next().map(|p| p.len()),
+            parts.next().map(|p| p.len()),
+            parts.next(),
+        ),
+        (Some(8), Some(4), Some(4), Some(4), Some(12), None)
+    ) && candidate
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() || b == b'-');
+    looks_like_uuid.then(|| candidate.to_string())
 }
 
 fn parse_codex_json_arg(payload: &serde_json::Value) -> Option<serde_json::Value> {

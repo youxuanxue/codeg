@@ -40,20 +40,25 @@ pub(crate) async fn list_all_conversations_core(
     chat_channel_manager: &crate::chat_channel::manager::ChatChannelManager,
     options: ListAllConversationsOptions,
 ) -> Result<Vec<DbConversationSummary>, AppCommandError> {
-    let codex_titles = match tokio::task::spawn_blocking(|| {
-        CodexParser::new().load_thread_name_index()
+    let (codex_titles, present_codex) = match tokio::task::spawn_blocking(|| {
+        let parser = CodexParser::new();
+        (parser.load_thread_name_index(), parser.present_session_ids())
     })
     .await
     {
-        Ok(titles) => titles,
+        Ok(pair) => pair,
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "conversation list: failed to load Codex session titles; continuing without refresh"
+                "conversation list: failed to load Codex session index; continuing without refresh/prune"
             );
-            HashMap::new()
+            (HashMap::new(), HashSet::new())
         }
     };
+    // Drop sidebar ghosts whose Codex rollout is gone. Runs before `list_all`
+    // so this response already excludes them; Deleted events keep other
+    // windows/clients in sync without a second refetch.
+    prune_missing_codex_sessions(conn, emitter, &present_codex).await;
     list_all_conversations_core_with_codex_titles(
         conn,
         emitter,
@@ -62,6 +67,43 @@ pub(crate) async fn list_all_conversations_core(
         &codex_titles,
     )
     .await
+}
+
+/// Soft-delete live Codex conversations whose rollout is no longer under
+/// `~/.codex/sessions` or `archived_sessions`, then broadcast deletion so every
+/// sidebar drops the row.
+async fn prune_missing_codex_sessions(
+    conn: &sea_orm::DatabaseConnection,
+    emitter: &EventEmitter,
+    present_codex: &HashSet<String>,
+) {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let Ok(rows) = conversation::Entity::find()
+        .filter(conversation::Column::ExternalId.is_not_null())
+        .filter(conversation::Column::AgentType.eq("codex"))
+        .filter(conversation::Column::DeletedAt.is_null())
+        .all(conn)
+        .await
+    else {
+        return;
+    };
+    let present: HashSet<(String, String)> = present_codex
+        .iter()
+        .map(|id| ("codex".to_string(), id.clone()))
+        .collect();
+    let pruned =
+        import_service::prune_missing_imported_sessions(conn, &rows, &present).await;
+    for conversation_id in pruned {
+        emit_conversation_deleted(emitter, conversation_id);
+        cleanup_tabs_for_deleted_conversation(emitter, conn, conversation_id).await;
+        crate::commands::canvas::cleanup_canvas_for_deleted_conversation(
+            emitter,
+            conn,
+            conversation_id,
+        )
+        .await;
+    }
 }
 
 async fn list_all_conversations_core_with_codex_titles(
@@ -718,6 +760,23 @@ async fn scan_importable_sessions_from_summaries(
         )
         .await,
     );
+
+    // Soft-delete rows whose agent-side files disappeared since import. Without
+    // this the sidebar keeps showing ghosts that fail to open. Cleanup runs the
+    // same funnel as a user delete so tabs/canvas/chat-folders converge.
+    let present = import_service::present_keys_with_codex_disk(&summaries);
+    let pruned =
+        import_service::prune_missing_imported_sessions(conn, &conv_rows, &present).await;
+    for conversation_id in pruned {
+        emit_conversation_deleted(emitter, conversation_id);
+        cleanup_tabs_for_deleted_conversation(emitter, conn, conversation_id).await;
+        crate::commands::canvas::cleanup_canvas_for_deleted_conversation(
+            emitter,
+            conn,
+            conversation_id,
+        )
+        .await;
+    }
 
     let folder_rows = load_folder_rows(conn).await?;
     Ok(build_scan_result(summaries, &imported_index, &folder_rows))
@@ -3982,6 +4041,68 @@ mod tests {
             [format!("#{} Codex index title", row.id)],
             "scan-discovered titles must propagate to a bound chat thread"
         );
+    }
+
+    #[tokio::test]
+    async fn scan_importable_sessions_prunes_missing_disk_sessions() {
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-scan-prune-missing").await;
+        let row = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            Some("ghost".into()),
+            None,
+        )
+        .await
+        .expect("create");
+        conversation_service::bind_external_id(&db.conn, row.id, "vanished-session", &[])
+            .await
+            .expect("bind");
+        // Age the row past the prune grace window.
+        {
+            let model = conversation::Entity::find_by_id(row.id)
+                .one(&db.conn)
+                .await
+                .expect("query")
+                .expect("row");
+            let mut active: conversation::ActiveModel = model.into();
+            active.created_at = Set(at(-7200));
+            active.updated_at = Set(at(-7200));
+            active.update(&db.conn).await.expect("age row");
+        }
+        let (broadcaster, emitter) = sync_test_emitter();
+        let mut events = broadcaster.subscribe();
+        let chat_channel_manager = crate::chat_channel::manager::ChatChannelManager::new();
+
+        // Empty summaries = nothing on disk for this agent.
+        let result = scan_importable_sessions_from_summaries(
+            &db.conn,
+            &emitter,
+            &chat_channel_manager,
+            vec![],
+        )
+        .await
+        .expect("scan");
+        assert_eq!(result.total_sessions, 0);
+
+        let stored = conversation::Entity::find_by_id(row.id)
+            .one(&db.conn)
+            .await
+            .expect("query")
+            .expect("row");
+        assert!(
+            stored.deleted_at.is_some(),
+            "scan must soft-delete conversations whose files vanished"
+        );
+        let event = events
+            .try_recv()
+            .expect("prune must broadcast conversation://changed Deleted");
+        assert_eq!(event.channel, CONVERSATION_CHANGED_EVENT);
+        assert_eq!(event.payload["kind"], "deleted");
+        assert_eq!(event.payload["id"], row.id);
     }
 
     /// The channel half of a title notification must not be on the caller's
