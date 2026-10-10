@@ -176,6 +176,19 @@
       "sectionDescription": "새 대화 페이지에서 입력창 위에 표시되는 '코드 개발 / 일상 업무' 바로가기 카드입니다.",
       "showQuickActions": "새 대화 페이지에 표시"
     },
+    "chatAnimations": {
+      "sectionTitle": "채팅 애니메이션",
+      "sectionDescription": "대화 영역의 접기/펼치기, 도구 호출, 작업 상태 등의 애니메이션과 부드러운 스크롤을 제어합니다. 끄면 즉시 갱신됩니다. 스피너는 계속 회전합니다.",
+      "enable": "채팅 애니메이션 사용"
+    },
+    "chatWidth": {
+      "sectionTitle": "채팅 너비",
+      "sectionDescription": "대화 영역과 입력창의 최대 너비입니다. 채팅 영역의 좌우 가장자리를 드래그해서 조정할 수도 있습니다.",
+      "label": "콘텐츠 너비",
+      "default": "기본값({width}px)",
+      "hint": "값은 창 확대/축소 100% 기준이며 배율에 따라 함께 조정됩니다. 너무 넓은 값은 창 크기에 맞게 자동으로 제한됩니다.",
+      "reset": "기본값으로 재설정"
+    },
     "workspaceBackground": {
       "sectionTitle": "작업 공간 배경",
       "sectionDescription": "작업 공간 전체 뒤에 이미지를 표시합니다. 사이드바와 패널이 반투명 유리 효과로 바뀌어 이미지가 비쳐 보이며, 마스크가 텍스트 가독성을 유지합니다.",
@@ -2057,7 +2070,8 @@
         "assistant": "어시스턴트",
         "system": "시스템",
         "toolResult": "결과",
-        "toolError": "오류"
+        "toolError": "오류",
+        "turnFailed": "턴 실패"
       },
       "moreActions": "추가 작업"
     },
@@ -2099,6 +2113,8 @@
     "conversationCard": {
       "untitledConversation": "제목 없는 대화",
       "newConversation": "새 대화",
+      "maximize": "최대화",
+      "restore": "복원",
       "attachToCurrentSession": "세션에 추가",
       "rename": "이름 변경",
       "status": "상태",
@@ -3426,6 +3442,7 @@
         "errorActionCommandCopied": "복사됨",
         "emptyConversation": "이 대화에는 메시지가 없습니다.",
         "systemMessage": "시스템 메시지",
+        "turnFailed": "이번 턴 실패: {message}",
         "copyMessage": "복사",
         "forkFromHere": "여기서 분기",
         "forkBusy": "턴이 실행 중일 때는 분기할 수 없습니다",
@@ -3462,7 +3479,8 @@
         "completedAt": "완료 시각",
         "jumpToPreviousUserMessage": "이전 사용자 메시지로 이동",
         "showMore": "더보기",
-        "showLess": "접기"
+        "showLess": "접기",
+        "resizeWidth": "드래그하여 채팅 너비 조정 · 더블 클릭하여 초기화"
       },
       "liveTurnStats": {
         "thinking": "생각 중...",
@@ -4504,6 +4522,7 @@
       "experts": "전문가",
       "science": "과학 연구",
       "office": "오피스 도구",
+      "ui": "UI",
       "custom": "사용자 지정"
     },
     "actions": {
@@ -4512,6 +4531,18 @@
     },
     "toasts": {
       "openFolderFailed": "폴더를 열지 못했습니다"
+    }
+  },
+  "GenerativeUiSettings": {
+    "loading": "불러오는 중…",
+    "switchLabel": "json-render 생성형 UI 사용",
+    "switchDescription": "켜면 Codeg가 시작하는 에이전트에 json-render 스킬이 설치되고, 답변의 spec 코드 블록이 상호작용할 수 있는 카드로 표시됩니다.",
+    "usage": "입력창에 /json-render와 요청을 입력하세요. 예: /json-render 이번에 변경된 파일을 표로 보여 줘. Codex에서는 $json-render를 사용합니다. 에이전트에게 카드나 표로 보여 달라고 직접 요청할 수도 있습니다.",
+    "effect": "카드 표시와 코드 블록으로의 복귀는 바로 적용됩니다. 스킬은 켠 뒤 새로 시작한 대화에서 사용할 수 있고, 끄면 모든 에이전트에서 즉시 제거됩니다.",
+    "conflict": "중앙 스킬 폴더에 직접 만든 json-render 스킬이 이미 있습니다. 내장 버전을 사용하려면 사용자 지정 탭에서 이름을 바꾸세요.",
+    "toasts": {
+      "saveFailed": "설정을 저장하지 못했습니다",
+      "unlinkFailed": "껐지만 다음 위치에서 json-render를 제거하지 못했습니다. 해당 에이전트가 다음에 시작될 때 다시 시도합니다."
     }
   },
   "QuickMessagesSettings": {

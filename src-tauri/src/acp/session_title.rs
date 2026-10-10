@@ -37,13 +37,16 @@ use crate::web::event_bridge::{emit_with_state, EventEmitter};
 /// and is ignored. The schema also uses `Null` to mean "clear"; we treat that
 /// the same as absent on purpose so an explicit clear cannot wipe the row
 /// back to Untitled. Whitespace-only strings are ignored for the same reason.
+///
+/// The rest of the normalization is the transcript reader's
+/// (`parsers::claude::displayed_session_title`), so the two Claude producers
+/// keep publishing the same string — see that function for JetBrains AIR's
+/// archive marker, which claude-agent-acp 0.89.0 removes on the wire only.
+/// `parsers::codex::codex_thread_title` reads a codex thread name through
+/// this function too, after collapsing it as codex-acp does, so a change here
+/// moves both codex producers together.
 pub(crate) fn native_title_from_session_info(title: Option<&str>) -> Option<String> {
-    let t = title?.trim();
-    if t.is_empty() {
-        None
-    } else {
-        Some(crate::parsers::truncate_str(t, 100))
-    }
+    crate::parsers::claude::displayed_session_title(title?)
 }
 
 /// Emit `title` as this connection's live session title, unless it is a repeat
@@ -208,6 +211,31 @@ mod tests {
         );
     }
 
+    /// JetBrains AIR archives a Claude session by prefixing its stored title
+    /// with `[archived] `; claude-agent-acp 0.89.0 drops one such marker from
+    /// the title it publishes to codeg, and an older adapter does not. Either
+    /// way codeg shows the title without any, by AIR's own rule.
+    #[test]
+    fn drops_the_air_archive_markers() {
+        for (raw, shown) in [
+            ("[archived] Fix login flow", "Fix login flow"),
+            ("  [archived]\t\n Fix login flow ", "Fix login flow"),
+            ("[archived] [archived] Fix login flow", "Fix login flow"),
+            ("[archived] [archived]", "[archived]"),
+            // Not a marker: nothing after it, or no white space before the title.
+            ("[archived]", "[archived]"),
+            ("[archived]   ", "[archived]"),
+            ("[archived]Fix login flow", "[archived]Fix login flow"),
+            ("Fix [archived] login flow", "Fix [archived] login flow"),
+        ] {
+            assert_eq!(
+                native_title_from_session_info(Some(raw)).as_deref(),
+                Some(shown),
+                "{raw:?}"
+            );
+        }
+    }
+
     #[test]
     fn caps_at_parser_title_length() {
         let long = "a".repeat(150);
@@ -239,19 +267,63 @@ mod tests {
             &"b".repeat(100),
             &"c".repeat(101),
             &format!("  {}  ", "d".repeat(150)),
+            "[archived] Fix login flow",
+            "[archived] [archived] Fix login flow",
+            "[archived]\u{3000}Fix login flow",
+            "[archived] \u{3000}Fix login flow",
+            &format!("[archived] {}", "e".repeat(150)),
         ] {
-            let record = serde_json::json!({ "type": "ai-title", "aiTitle": raw });
-            let (mut custom, mut ai) = (None, None);
-            crate::parsers::claude::capture_title_record(
-                &record,
-                "ai-title",
-                &mut custom,
-                &mut ai,
-            );
+            for (record_type, field) in [("ai-title", "aiTitle"), ("custom-title", "customTitle")] {
+                let record = serde_json::json!({ "type": record_type, field: raw });
+                let (mut custom, mut ai) = (None, None);
+                crate::parsers::claude::capture_title_record(
+                    &record,
+                    record_type,
+                    &mut custom,
+                    &mut ai,
+                );
+                assert_eq!(
+                    native_title_from_session_info(Some(raw)),
+                    custom.or(ai),
+                    "wire and transcript producers disagree on {raw:?} ({record_type})"
+                );
+            }
+        }
+    }
+
+    /// claude-agent-acp 0.89.0 removes one archive marker before it publishes,
+    /// so the wire hands codeg the transcript's title minus that marker. The
+    /// two producers stay equal only if normalizing a normalized title changes
+    /// nothing: the record keeps `[archived] [archived] X`, the wire carries
+    /// `[archived] X`, and both must read `X`.
+    #[test]
+    fn a_title_the_adapter_already_unmarked_reads_the_same() {
+        let record = serde_json::json!({
+            "type": "custom-title",
+            "customTitle": "[archived] [archived] Fix login flow",
+        });
+        let (mut custom, mut ai) = (None, None);
+        crate::parsers::claude::capture_title_record(&record, "custom-title", &mut custom, &mut ai);
+        let published_by_0_89 = "[archived] Fix login flow";
+        assert_eq!(
+            native_title_from_session_info(Some(published_by_0_89)),
+            custom
+        );
+        assert_eq!(custom.as_deref(), Some("Fix login flow"));
+
+        for raw in [
+            "[archived] Fix login flow",
+            "[archived] [archived] Fix login flow",
+            "[archived]",
+            "[archived] [archived]",
+            "  [archived]\t\u{3000}Fix  ",
+            &format!("[archived] {}", "f".repeat(150)),
+        ] {
+            let once = native_title_from_session_info(Some(raw)).expect("a title");
             assert_eq!(
-                native_title_from_session_info(Some(raw)),
-                ai,
-                "wire and transcript producers disagree on {raw:?}"
+                native_title_from_session_info(Some(&once)).as_deref(),
+                Some(once.as_str()),
+                "{raw:?}"
             );
         }
     }

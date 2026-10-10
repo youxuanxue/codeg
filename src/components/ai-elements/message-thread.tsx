@@ -3,6 +3,7 @@
 import type { ComponentProps } from "react"
 
 import { Button } from "@/components/ui/button"
+import { useChatAnimationsEnabled } from "@/hooks/use-appearance"
 import { cn } from "@/lib/utils"
 import { ArrowDownIcon, DownloadIcon } from "lucide-react"
 import { useTranslations } from "next-intl"
@@ -338,10 +339,11 @@ export const MessageThreadScrollButton = ({
   ...props
 }: MessageThreadScrollButtonProps) => {
   const { isAtBottom, scrollToBottom } = useStickToBottomContext()
+  const chatAnimations = useChatAnimationsEnabled()
 
   const handleScrollToBottom = useCallback(() => {
-    scrollToBottom()
-  }, [scrollToBottom])
+    scrollToBottom(chatAnimations ? undefined : { animation: "instant" })
+  }, [scrollToBottom, chatAnimations])
 
   return (
     !isAtBottom && (

@@ -70,6 +70,7 @@ import { FILL_MODE_STYLE } from "@/lib/workspace-background"
 import { TabBar } from "@/components/tabs/tab-bar"
 import { TerminalPanel } from "@/components/terminal/terminal-panel"
 import { AuxPanel } from "@/components/layout/aux-panel"
+import { ChromeReserve } from "@/components/layout/chrome-reserve"
 import { LeftEdgeChrome } from "@/components/layout/left-edge-chrome"
 import { RightEdgeChrome } from "@/components/layout/right-edge-chrome"
 import { WorkspaceChromeController } from "@/components/layout/workspace-chrome-controller"
@@ -136,8 +137,10 @@ const LAYOUT_EPSILON = 0.25
 // skipped until they added up, and the next drag started that far off the
 // divider on screen.
 const PIXEL_LAYOUT_EPSILON = 0.01
-// Slide duration for panel show/hide; must match the CSS transition on
-// `.panel-slide-animating > [data-panel]` in globals.css. The transition class
+// Slide duration for panel show/hide; must match the CSS transitions on
+// `.panel-slide-animating > [data-panel]` and on the top strips' corner
+// reserves (`.chrome-reserve`) in globals.css — pinned together by
+// chrome-reserve-slide-source.test.ts. The transition class
 // is held a touch past this so the animation finishes before it's removed
 // (removing it mid-transition would snap the final pixels).
 const PANEL_SLIDE_MS = 240
@@ -268,7 +271,7 @@ function KeptMountedSurface({
 }
 
 function WorkspaceContent({ children }: { children: React.ReactNode }) {
-  const { mode, filesMaximized } = useWorkspaceView()
+  const { mode, filesMaximized, conversationMaximized } = useWorkspaceView()
   const { setActivePane } = useWorkspaceActions()
   const panelGroupRef = useRef<ImperativePanelGroupHandle | null>(null)
   const fusionLayoutRef = useRef<[number, number]>(DEFAULT_FUSION_LAYOUT)
@@ -281,9 +284,9 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
   }, [mode, filesMaximized, setActivePane])
 
   const markFileActive = useCallback(() => {
-    if (mode !== "fusion") return
+    if (mode !== "fusion" || conversationMaximized) return
     setActivePane("files")
-  }, [mode, setActivePane])
+  }, [mode, conversationMaximized, setActivePane])
 
   const applyLayout = useCallback((layout: [number, number]) => {
     desiredLayoutRef.current = layout
@@ -349,14 +352,28 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
   // tracks the rem-sized overlay buttons (which grow with zoom).
   const leftReserve = leftChromeReserve(isMac && isDesktop(), zoomLevel)
   const rightReserve = rightChromeReserve(winLinuxControls, zoomLevel)
-  // A middle column reserves the right overlay only when it (not the aux panel)
-  // is the window's right edge: the file column in fusion, else conversation.
-  const convReservesRight = !auxOpen && mode === "conversation"
-  const fileReservesRight = !auxOpen && mode === "fusion"
-  // Maximizing files overlays the whole middle area, so the file column then
-  // also owns the window's LEFT edge when the sidebar is collapsed — reserve the
-  // left overlay too (normally that's the conversation column's job).
-  const fileReservesLeft = filesMaximized && !sidebarOpen
+  // A corner needs reserving only while no side panel covers it, and that
+  // width slides in and out with the panel's own toggle (ChromeReserve).
+  const leftCornerWidth = sidebarOpen ? 0 : leftReserve
+  const rightCornerWidth = auxOpen ? 0 : rightReserve
+  // The conversation column covers the whole middle area, the file column
+  // hidden under it: there is no file column (conversation mode), or the
+  // conversation is maximized over it.
+  const conversationFillsArea = mode === "conversation" || conversationMaximized
+  // WHICH column holds a corner is structural instead: the right one is the
+  // file column's in fusion, else the conversation column's; maximizing files
+  // overlays the whole middle area, so the file column then holds the LEFT one
+  // too (normally that's the conversation column's job), and maximizing the
+  // conversation hands the RIGHT one to the conversation column the same way
+  // (the covered file column keeps its own, unseen, just as the covered
+  // conversation column keeps its left one). Those switches snap the layout,
+  // so they decide whether a reserve is MOUNTED — a mounted one would keep
+  // animating after its column had moved (picking a nested file in search
+  // opens the aux panel and the first file tab within one slide), and a fresh
+  // mount starts at its final width.
+  const convHoldsRight = conversationFillsArea
+  const fileHoldsRight = mode === "fusion"
+  const fileHoldsLeft = filesMaximized
 
   return (
     <div className="relative h-full min-h-0 overflow-hidden">
@@ -380,7 +397,11 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
               <section
                 className={cn(
                   "flex h-full min-h-0 flex-col overflow-hidden",
-                  mode === "conversation" &&
+                  // Over the whole area — the same overlay for conversation
+                  // mode and for a maximized conversation, so maximizing
+                  // resizes nothing in the file column underneath (its
+                  // editors and pages keep their size and state).
+                  conversationFillsArea &&
                     "absolute inset-0 z-30 bg-background ws-transparent-bg",
                   // Covered by the files-maximized overlay: stop painting so it
                   // can't show through the now-translucent overlay. `invisible`
@@ -394,14 +415,18 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
                 inert={filesMaximized || undefined}
               >
                 {/* Conversation column top bar (UNSPLIT only): the tab strip,
-                  plus a left reserve (only when the sidebar is collapsed, so
-                  this column owns the window's left edge) and a right reserve
-                  (only when it's the window's right edge) for the fixed corner
-                  overlays. The detail header + tiles render inside {children},
-                  directly below. `bg-muted` shades the strip like a browser tab
-                  bar (matching the bottom StatusBar) — the active tab
-                  (bg-background) reads as a white tab seated on it, with
-                  reverse bottom corners. With a workspace background image on,
+                  plus a left reserve (this column always holds the window's
+                  left corner; it is 0 wide while the sidebar covers it) and a
+                  right reserve (mounted only while this column is the window's
+                  right edge — conversation mode, or maximized over the file
+                  column; 0 wide while the aux panel
+                  covers it) for the fixed corner overlays — both slide with
+                  their panel's toggle (ChromeReserve). The detail header +
+                  tiles render inside {children}, directly below. `bg-muted`
+                  shades the strip like a browser tab bar (matching the bottom
+                  StatusBar) — the active tab (bg-background) reads as a white
+                  tab seated on it, with reverse bottom corners. With a
+                  workspace background image on,
                   the strip + every tab go transparent (reveal the image); a
                   hairline bottom border (ws-strip-line) runs under the reserves
                   and inactive tabs while the active tab omits it and the border
@@ -413,16 +438,12 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
                   SplitStripCornerReserve in conversation-detail-panel). */}
                 {!isConvSplit && (
                   <div className="flex h-10 shrink-0 items-stretch bg-muted ws-transparent-bg">
-                    {!sidebarOpen && (
-                      <div
-                        data-tauri-drag-region
-                        className="h-full shrink-0 ws-strip-line"
-                        style={{ width: leftReserve }}
-                      />
-                    )}
+                    <ChromeReserve width={leftCornerWidth} />
                     <div className="flex min-w-0 flex-1 items-stretch">
                       {hasConvTabs ? (
-                        <TabBar />
+                        // The unsplit strip IS the column's top-right strip,
+                        // so it carries the maximize/restore button.
+                        <TabBar maximizeControl />
                       ) : (
                         // No tabs → TabBar renders null; keep a drag region so
                         // the title bar can still move the window.
@@ -432,12 +453,8 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
                         />
                       )}
                     </div>
-                    {convReservesRight && (
-                      <div
-                        data-tauri-drag-region
-                        className="h-full shrink-0 ws-strip-line"
-                        style={{ width: rightReserve }}
-                      />
+                    {convHoldsRight && (
+                      <ChromeReserve width={rightCornerWidth} />
                     )}
                   </div>
                 )}
@@ -461,22 +478,25 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
           </ResizablePanel>
           {/* The divider only belongs to a real two-column split. In conversation
               mode the column overlays the whole area, so the handle collapses to
-              zero width. While files are MAXIMIZED it must go too: that overlay
-              is translucent under a workspace background image, so the handle's
-              1px `bg-border` line stayed visible straight through it — a stray
-              vertical divider running down the maximized file column and on
-              through the editor / diff canvas below. There it only turns
-              invisible (no `w-0`): dropping its width would resize the
-              conversation panel and reset its stick-to-bottom scroll, the very
-              thing the overlay approach avoids. */}
+              zero width. While either column is MAXIMIZED it must go too: that
+              overlay is translucent under a workspace background image, so the
+              handle's 1px `bg-border` line stayed visible straight through it —
+              a stray vertical divider running down the maximized column and on
+              through the editor / diff canvas or transcript below. There it
+              only turns invisible (no `w-0`): dropping its width would resize
+              the covered column — the conversation panel's stick-to-bottom
+              scroll resets, the file column's editors and pages re-lay out —
+              the very thing the overlay approach avoids. */}
           <ResizableHandle
             withHandle
-            disabled={mode !== "fusion" || filesMaximized}
+            disabled={
+              mode !== "fusion" || filesMaximized || conversationMaximized
+            }
             className={cn(
               mode !== "fusion" &&
                 "pointer-events-none w-0 opacity-0 after:w-0",
               mode === "fusion" &&
-                filesMaximized &&
+                (filesMaximized || conversationMaximized) &&
                 "pointer-events-none invisible"
             )}
           />
@@ -495,68 +515,70 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
                 root. This depends on react-resizable-panels keeping the Panel
                 root at `position: static`; if a future version sets
                 `position: relative` there, this overlay (and the mirrored
-                `mode === "conversation"` overlay above) would clip to the
+                `conversationFillsArea` overlay above) would clip to the
                 Panel's allocated slice and need to be lifted outside the panel
-                group. */}
-            <section
-              className={cn(
-                "flex h-full min-h-0 flex-col overflow-hidden",
-                filesMaximized &&
-                  "absolute inset-0 z-30 bg-background ws-transparent-bg",
-                // Covered by the conversation overlay in conversation mode: hide
-                // from paint (keep mount + layout) so it can't show through the
-                // translucent overlay. conversation-tab-hidden goes with it —
-                // an open git-diff tab lives in this column and Monaco's diff
-                // panes set their own inline `visibility: visible` (see
-                // globals.css), so `invisible` alone leaves them painting.
-                mode === "conversation" && "conversation-tab-hidden invisible"
-              )}
-              aria-hidden={mode === "conversation"}
-            >
-              {/* File column top bar: the file tab strip + a right reserve for
-                  the fixed corner overlay (only when the aux panel is collapsed,
-                  so this column owns the window's right edge). Per-file actions
-                  live in FileWorkspaceHeader below, above every
-                  FileWorkspacePanel render branch. `bg-muted` shades the strip
-                  like a browser tab bar (matches the conversation column and the
-                  bottom StatusBar). With a workspace background image on, the
-                  strip + every tab go transparent (reveal the image) and a
-                  hairline bottom border (ws-strip-line) sits under the reserves
-                  and inactive tabs, arching over the active tab (the active
-                  browser-tab-item's `::after`) — same as the conversation column. */}
-              <div className="flex h-10 shrink-0 items-stretch bg-muted ws-transparent-bg">
-                {fileReservesLeft && (
-                  <div
-                    data-tauri-drag-region
-                    className="h-full shrink-0 ws-strip-line"
-                    style={{ width: leftReserve }}
-                  />
+                group.
+                While the conversation overlay covers this column it is the
+                mirror of the conversation column under the files overlay, and
+                gets the same four parts (see `KeptMountedSurface`). The flag
+                matters most here for the built-in browser: a page is a native
+                view painted above the whole DOM, out of reach of any CSS, so
+                its host has to take it off screen — and this flag tells it so
+                directly, without leaning on the engine reporting the
+                placeholder's CSS visibility. */}
+            <OverlayHostHiddenProvider hidden={conversationFillsArea}>
+              <section
+                className={cn(
+                  "flex h-full min-h-0 flex-col overflow-hidden",
+                  filesMaximized &&
+                    "absolute inset-0 z-30 bg-background ws-transparent-bg",
+                  // Covered by the conversation overlay (conversation mode, or a
+                  // maximized conversation): hide from paint (keep mount +
+                  // layout) so it can't show through the translucent overlay.
+                  // conversation-tab-hidden goes with it — an open git-diff tab
+                  // lives in this column and Monaco's diff panes set their own
+                  // inline `visibility: visible` (see globals.css), so
+                  // `invisible` alone leaves them painting.
+                  conversationFillsArea && "conversation-tab-hidden invisible"
                 )}
-                <div className="flex min-w-0 flex-1 items-stretch">
-                  <FileWorkspaceTabBar />
-                </div>
-                {fileReservesRight && (
-                  <div
-                    data-tauri-drag-region
-                    className="h-full shrink-0 ws-strip-line"
-                    style={{ width: rightReserve }}
-                  />
-                )}
-              </div>
-              {/* Pane activation on the file content + its detail header, not
-                  the top bar (see the conversation section). */}
-              <div
-                className="flex min-h-0 flex-1 flex-col overflow-hidden"
-                data-workspace-pane="files"
-                onPointerDownCapture={markFileActive}
-                onFocusCapture={markFileActive}
+                aria-hidden={conversationFillsArea}
+                inert={conversationFillsArea || undefined}
               >
-                <FileWorkspaceHeader />
-                <div className="flex-1 min-h-0 overflow-hidden">
-                  <FileWorkspacePanel />
+                {/* File column top bar: the file tab strip + a right reserve for
+                    the fixed corner overlay (mounted in fusion, when this column
+                    is the window's right edge; 0 wide while the aux panel covers
+                    it) and, while files are maximized, a left one (0 wide while
+                    the sidebar covers it). Per-file actions live in
+                    FileWorkspaceHeader below, above every FileWorkspacePanel
+                    render branch. `bg-muted` shades the strip like a browser tab
+                    bar (matches the conversation column and the bottom
+                    StatusBar). With a workspace background image on, the
+                    strip + every tab go transparent (reveal the image) and a
+                    hairline bottom border (ws-strip-line) sits under the reserves
+                    and inactive tabs, arching over the active tab (the active
+                    browser-tab-item's `::after`) — same as the conversation column. */}
+                <div className="flex h-10 shrink-0 items-stretch bg-muted ws-transparent-bg">
+                  {fileHoldsLeft && <ChromeReserve width={leftCornerWidth} />}
+                  <div className="flex min-w-0 flex-1 items-stretch">
+                    <FileWorkspaceTabBar />
+                  </div>
+                  {fileHoldsRight && <ChromeReserve width={rightCornerWidth} />}
                 </div>
-              </div>
-            </section>
+                {/* Pane activation on the file content + its detail header, not
+                    the top bar (see the conversation section). */}
+                <div
+                  className="flex min-h-0 flex-1 flex-col overflow-hidden"
+                  data-workspace-pane="files"
+                  onPointerDownCapture={markFileActive}
+                  onFocusCapture={markFileActive}
+                >
+                  <FileWorkspaceHeader />
+                  <div className="flex-1 min-h-0 overflow-hidden">
+                    <FileWorkspacePanel />
+                  </div>
+                </div>
+              </section>
+            </OverlayHostHiddenProvider>
           </ResizablePanel>
         </ResizablePanelGroup>
       </KeptMountedSurface>
@@ -570,20 +592,16 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
               band, hosts the active route's title on the left, and keeps the
               empty middle as a window-drag region. With a title present it
               closes with the sidebar-header hairline (ws-chrome-border keeps
-              it legible over a background image). */}
+              it legible over a background image) — which is why its left
+              reserve, sliding with the sidebar like the tab strips' do, draws
+              no strip hairline of its own. */}
           <div
             className={cn(
               "flex h-10 shrink-0 items-stretch",
               hasRouteStrip && "border-b border-border/50 ws-chrome-border"
             )}
           >
-            {!sidebarOpen && (
-              <div
-                data-tauri-drag-region
-                className="h-full shrink-0"
-                style={{ width: leftReserve }}
-              />
-            )}
+            <ChromeReserve width={leftCornerWidth} line={false} />
             <WorkbenchRouteStrip />
             <div data-tauri-drag-region className="h-full min-w-0 flex-1" />
           </div>

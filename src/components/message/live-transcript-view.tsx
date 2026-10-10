@@ -336,7 +336,7 @@ export function LiveTranscriptView({
         </div>
       )}
       {/* No padding of its own. `MessageListView` insets its own content —
-          every virtualized row is wrapped in `mx-auto max-w-3xl px-4` and the
+          every virtualized row is wrapped in `mx-auto chat-content-w px-4` and the
           virtualizer adds 16px above the first row and below the last — so a
           padded wrapper here doubled it, and in a panel this narrow the two
           layers cost the transcript a visible chunk of its width. This is

@@ -65,7 +65,7 @@ interface VirtualizedMessageThreadProps<T> {
   gap?: number
   /** Vertical padding before the first / after the last item. @default 16 */
   padding?: number
-  /** Extra className on every item's inner wrapper (the `max-w-3xl` div). */
+  /** Extra className on every item's inner wrapper (the `chat-content-w` div). */
   className?: string
   /** Extra className on the MessageThreadContent shell. */
   contentClassName?: string
@@ -332,7 +332,7 @@ function VirtualizedMessageThreadImpl<T>({
     <MessageScrollProvider value={scrollContextValue}>
       <MessageThreadContent
         className={cn("mx-0 max-w-none p-0", contentClassName)}
-        scrollClassName="scrollbar-thin overscroll-contain [overflow-anchor:none] outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset data-[focus-origin=pointer]:focus-visible:ring-0"
+        scrollClassName="chat-scroll-port scrollbar-thin overscroll-contain [overflow-anchor:none] outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset data-[focus-origin=pointer]:focus-visible:ring-0"
         {...contentProps}
       >
         {items.length === 0 ? (
@@ -348,7 +348,7 @@ function VirtualizedMessageThreadImpl<T>({
           >
             {hasOlder ? (
               <div key="load-older-row" style={styles.first}>
-                <div className={cn("mx-auto max-w-3xl px-4", className)}>
+                <div className={cn("mx-auto chat-content-w px-4", className)}>
                   <button
                     type="button"
                     onClick={isLoadingOlder ? undefined : onLoadOlder}
@@ -372,7 +372,7 @@ function VirtualizedMessageThreadImpl<T>({
                 key={getItemKey(item, index)}
                 style={itemStyle(index, items.length)}
               >
-                <div className={cn("mx-auto max-w-3xl px-4", className)}>
+                <div className={cn("mx-auto chat-content-w px-4", className)}>
                   {renderItem(item, index)}
                 </div>
               </div>

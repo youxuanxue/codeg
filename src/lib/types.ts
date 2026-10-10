@@ -245,6 +245,14 @@ export type ContentBlock =
     }
   | { type: "thinking"; text: string }
   /**
+   * The turn FAILED, in the agent's own words. Mirror of Rust
+   * `ContentBlock::TurnError`: a parser puts it alone in a `system` turn
+   * closing the round, and the live stream does the same with the failure the
+   * adapter reported (`buildStreamingTurnsFromLiveMessage`). Drawn as one muted
+   * line, never as a reply.
+   */
+  | { type: "turn_error"; message: string }
+  /**
    * Frontend-only, LIVE-stream synthetic block. It is NEVER persisted and
    * NEVER emitted by the Rust JSONL parsers — the persisted plan path is a
    * `TodoWrite` tool_use block. It exists purely so a live plan can survive
@@ -609,6 +617,14 @@ export const FOLDER_LINKS_CHANGED_EVENT = "folder://links-changed"
  *  conversation feedback bar converges on this backend broadcast rather than a
  *  frontend-only cache. Mirrors the Rust `FEEDBACK_SETTINGS_CHANGED_EVENT`. */
 export const FEEDBACK_SETTINGS_CHANGED_EVENT = "feedback-settings://changed"
+
+/** Global side-channel announcing a generative-UI enable/disable (payload is
+ *  `GenerativeUiSettings`). The settings UI runs in a separate window, so open
+ *  conversations learn that spec fences render as cards — or no longer do —
+ *  from this backend broadcast. Mirrors the Rust
+ *  `GENERATIVE_UI_SETTINGS_CHANGED_EVENT`. */
+export const GENERATIVE_UI_SETTINGS_CHANGED_EVENT =
+  "generative-ui-settings://changed"
 
 /** Global side-channel announcing a create-from-chat switch move (payload is
  *  `ChatAuthoringSettings`). Load-bearing rather than cosmetic: these two flags
