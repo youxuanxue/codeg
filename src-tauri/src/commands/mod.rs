@@ -39,6 +39,8 @@ pub mod folder_commands;
 pub mod folder_links;
 pub mod folders;
 pub mod forge;
+/// The generative-UI switch and the `json-render` skill it links into agents.
+pub mod generative_ui;
 pub mod logging;
 pub mod mcp;
 pub mod mcp_service;

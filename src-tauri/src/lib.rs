@@ -518,6 +518,26 @@ mod tauri_app {
             apply_webview_rendering_override()
         };
 
+        // The data directory next, for the same reason, and before the logging
+        // init resolves the log directory from it — the order `codeg-server`
+        // keeps. When `setup` exported it, the logs of a launch from the Start
+        // menu or the Dock went to `~/.codeg/logs`, while an instance codeg
+        // restarted inherited the variable and wrote beside the database (see
+        // `paths::desktop_data_dir`). Written back absolutized even when
+        // preset, so subprocesses inherit an absolute path (a relative one
+        // would re-resolve against their own working directory) and every
+        // reader of the variable sees the value the in-process resolver
+        // returns.
+        let context = tauri::generate_context!();
+        if let Some(data_dir) = paths::desktop_data_dir(
+            std::env::var_os("CODEG_DATA_DIR").as_deref(),
+            dirs::data_dir().as_deref(),
+            &context.config().identifier,
+        ) {
+            // SAFETY: single-threaded as argued above.
+            unsafe { std::env::set_var("CODEG_DATA_DIR", &data_dir) };
+        }
+
         // Install the logging subscriber next so it captures everything from
         // here on. The file appender's logs dir is resolved from env (no DB
         // needed); hold the guard for the whole process so buffered file lines
@@ -681,31 +701,30 @@ mod tauri_app {
                 // to the same helper so a pre-set `CODEG_DATA_DIR` is
                 // honored end-to-end.
                 //
-                // We also write the absolutized value back to the env,
-                // even when the operator pre-set it, so:
-                //   * subprocesses inherit an absolute path (a relative
-                //     `CODEG_DATA_DIR` would otherwise re-resolve
-                //     against the subprocess CWD, which may differ
-                //     from ours), and
-                //   * any future caller that reaches for the env
-                //     directly sees the same value the in-process
-                //     resolver returns.
-                //
-                // `set_var` is `unsafe` in edition 2024. We are still
-                // single-threaded at this point: `setup` runs on the
-                // main thread before any window or async runtime task
-                // reads the var, the Tauri plugins registered above
-                // (window state, opener, dialog, updater, process,
-                // notification) do not read `CODEG_DATA_DIR`, and the
-                // value is never mutated again for the lifetime of the
-                // process.
+                // `run()` exported the effective root as `CODEG_DATA_DIR`
+                // before the logging init (see `paths::desktop_data_dir`),
+                // so this resolves to it; nothing writes the variable after
+                // that. The derivation `run()` falls back to is Tauri's own
+                // — the platform data directory joined with the identifier —
+                // checked here on the raw values, since the exported root
+                // would only echo itself back: were the two ever to part, a
+                // plain launch would open a database Tauri's directory does
+                // not hold.
                 let effective_data_dir = paths::resolve_effective_data_dir(&app_data_dir);
-                // SAFETY: see the rationale block above — still
-                // single-threaded at setup; edition 2024 will require
-                // the `unsafe` block, mirroring the WebView2 rendering
-                // override.
-                unsafe {
-                    std::env::set_var("CODEG_DATA_DIR", &effective_data_dir);
+                let derived_data_dir = paths::desktop_data_dir(
+                    None,
+                    dirs::data_dir().as_deref(),
+                    &app.config().identifier,
+                );
+                if derived_data_dir.as_deref()
+                    != Some(git_credential::absolutize(&app_data_dir).as_path())
+                {
+                    tracing::warn!(
+                        "[paths][WARN] the data directory derived at startup ({:?}) differs from Tauri's app_data_dir ({}); the database follows {}",
+                        derived_data_dir,
+                        app_data_dir.display(),
+                        effective_data_dir.display()
+                    );
                 }
 
                 // `CODEG_HOME` overrides `CODEG_DATA_DIR` inside
@@ -1115,6 +1134,10 @@ mod tauri_app {
                         crate::commands::computer_tools::apply_persisted_computer_tools_config(
                             &db_for_init,
                             &computer_tools_for_init,
+                        )
+                        .await;
+                        crate::commands::generative_ui::apply_persisted_generative_ui_config(
+                            &db_for_init,
                         )
                         .await;
                     });
@@ -1884,6 +1907,8 @@ mod tauri_app {
                 feedback_commands::get_feedback_settings,
                 feedback_commands::set_feedback_settings,
                 feedback_commands::submit_session_feedback,
+                crate::commands::generative_ui::get_generative_ui_settings,
+                crate::commands::generative_ui::set_generative_ui_settings,
                 question_commands::get_question_settings,
                 question_commands::set_question_settings,
                 session_info_commands::get_session_info_settings,
@@ -2195,7 +2220,7 @@ mod tauri_app {
                 web::update_web_service_config,
                 web::probe_web_service_port,
             ])
-            .build(tauri::generate_context!())
+            .build(context)
             .expect("error while building tauri application")
             .run(|app, event| match event {
                 // Some quits only ever reach `Exit`; see `shut_down`.

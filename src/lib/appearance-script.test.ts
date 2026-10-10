@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import {
   APPEARANCE_INIT_SCRIPT,
+  STORAGE_KEY_CHAT_ANIMATIONS,
+  STORAGE_KEY_CHAT_CONTENT_WIDTH,
   STORAGE_KEY_CUSTOM_CSS,
   STORAGE_KEY_CUSTOM_CSS_ENABLED,
   STORAGE_KEY_CUSTOM_STYLE_SUSPENDED,
@@ -32,6 +34,7 @@ function resetDocument() {
   root.removeAttribute("style")
   root.removeAttribute("data-theme")
   root.removeAttribute("data-workspace-bg")
+  root.removeAttribute("data-chat-animations")
   root.classList.remove("dark")
   document.getElementById(CUSTOM_CSS_ELEMENT_ID)?.remove()
   document
@@ -295,4 +298,40 @@ describe("APPEARANCE_INIT_SCRIPT — theme-color", () => {
     expect(document.documentElement.classList.contains("dark")).toBe(true)
     expect(contents()).toEqual([THEME_COLOR_LIGHT, THEME_COLOR_DARK])
   })
+})
+
+describe("APPEARANCE_INIT_SCRIPT — chat area", () => {
+  const root = () => document.documentElement
+  const chatWidth = () => root().style.getPropertyValue("--chat-content-width")
+
+  it("marks <html> only for an explicit animations-off choice", () => {
+    runInitScript()
+    expect(root().hasAttribute("data-chat-animations")).toBe(false)
+
+    localStorage.setItem(STORAGE_KEY_CHAT_ANIMATIONS, "1")
+    runInitScript()
+    expect(root().hasAttribute("data-chat-animations")).toBe(false)
+
+    localStorage.setItem(STORAGE_KEY_CHAT_ANIMATIONS, "0")
+    runInitScript()
+    expect(root().getAttribute("data-chat-animations")).toBe("off")
+  })
+
+  it("applies a stored chat width in rem, so it scales with the zoom", () => {
+    localStorage.setItem(STORAGE_KEY_CHAT_CONTENT_WIDTH, "900")
+    localStorage.setItem(STORAGE_KEY_ZOOM_LEVEL, "200")
+    runInitScript()
+    expect(chatWidth()).toBe("56.25rem")
+    // The zoom itself still lands: the width follows it through rem.
+    expect(root().style.fontSize).toBe("32px")
+  })
+
+  it.each(["", "abc", "0", "-5", "99999"])(
+    "leaves the default width for a stored %j",
+    (raw) => {
+      localStorage.setItem(STORAGE_KEY_CHAT_CONTENT_WIDTH, raw)
+      runInitScript()
+      expect(chatWidth()).toBe("")
+    }
+  )
 })

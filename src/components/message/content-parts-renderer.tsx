@@ -24,6 +24,7 @@ import {
   estimateChangedLineStats,
 } from "@/lib/line-change-stats"
 import { MessageResponse } from "@/components/ai-elements/message"
+import { JsonRenderScope } from "@/components/ai-elements/json-render-pre"
 import { Shimmer } from "@/components/ai-elements/shimmer"
 import {
   Collapsible,
@@ -58,6 +59,7 @@ import {
 } from "./context-compaction-card"
 import { contextCompactionSummary } from "@/lib/context-compaction"
 import { FeedbackCheckResultCard } from "./feedback-check-result-card"
+import { TurnErrorPart } from "./turn-error-part"
 import { SearchResultsOutput } from "./search-results-output"
 import {
   isCodexGrepNoMatchEnvelope,
@@ -2341,12 +2343,16 @@ function MarkdownText({
 }) {
   return (
     <div className='break-words text-sm prose prose-sm dark:prose-invert max-w-none [&_ul]:list-inside [&_ol]:list-inside [&_[data-streamdown="code-block-body"]]:max-h-96 [&_[data-streamdown="code-block-body"]]:overflow-auto'>
-      <MessageResponse
-        mode={isStreaming ? "streaming" : "static"}
-        parseIncompleteMarkdown={isStreaming}
-      >
-        {text}
-      </MessageResponse>
+      {/* An assistant reply's own text: the one place a ```spec fence may
+          render as a json-render card. */}
+      <JsonRenderScope>
+        <MessageResponse
+          mode={isStreaming ? "streaming" : "static"}
+          parseIncompleteMarkdown={isStreaming}
+        >
+          {text}
+        </MessageResponse>
+      </JsonRenderScope>
     </div>
   )
 }
@@ -3276,6 +3282,12 @@ export const ContentPartsRenderer = memo(function ContentPartsRenderer({
           image={part.image}
           status={part.status}
         />
+      )
+    }
+
+    if (part.type === "turn-error") {
+      return (
+        <TurnErrorPart key={`turn-error-${keyId}`} message={part.message} />
       )
     }
 

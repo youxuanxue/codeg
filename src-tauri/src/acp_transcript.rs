@@ -154,6 +154,14 @@ pub struct TranscriptEntry {
     pub t: u64,
     pub k: EntryKind,
     pub p: serde_json::Value,
+    /// On a [`EntryKind::Prompt`]: codeg delivered it INTO the running turn
+    /// (a native steer) instead of starting a turn with it. The reader still
+    /// splits the turn there — the steer is a user message of its own — but
+    /// the turn did not start at it, so the turn end's whole-turn duration does
+    /// not belong to the part that follows. Absent (false) everywhere else; a
+    /// reader that predates it sees an ordinary prompt.
+    #[serde(rename = "s", default, skip_serializing_if = "std::ops::Not::not")]
+    pub steer: bool,
 }
 
 /// A parsed transcript: its header (when present and readable) plus every
@@ -879,6 +887,39 @@ pub fn record_entry_in(
         t: now_epoch_ms(),
         k: kind,
         p: payload,
+        steer: false,
+    };
+    queue_for(root, agent_dir, session_id, PendingRecord::Entry(entry))
+}
+
+/// Record a message delivered into the running turn (a native steer): a
+/// [`EntryKind::Prompt`] carrying the ACP content blocks that were sent,
+/// marked [`TranscriptEntry::steer`].
+pub fn record_steer(
+    agent_dir: &str,
+    session_id: &str,
+    payload: serde_json::Value,
+) -> tokio::sync::oneshot::Receiver<()> {
+    record_steer_in(
+        &crate::paths::codeg_acp_transcripts_root(),
+        agent_dir,
+        session_id,
+        payload,
+    )
+}
+
+/// Root-injectable core of [`record_steer`].
+pub fn record_steer_in(
+    root: &Path,
+    agent_dir: &str,
+    session_id: &str,
+    payload: serde_json::Value,
+) -> tokio::sync::oneshot::Receiver<()> {
+    let entry = TranscriptEntry {
+        t: now_epoch_ms(),
+        k: EntryKind::Prompt,
+        p: payload,
+        steer: true,
     };
     queue_for(root, agent_dir, session_id, PendingRecord::Entry(entry))
 }
@@ -1284,6 +1325,7 @@ mod tests {
         serde_json::to_string(&TranscriptEntry {
             t: 1_750_000_000_001,
             k: kind,
+            steer: false,
             p: payload,
         })
         .unwrap()
@@ -1762,6 +1804,7 @@ mod tests {
         PendingRecord::Entry(TranscriptEntry {
             t,
             k: EntryKind::Update,
+            steer: false,
             p: serde_json::json!({
                 "sessionUpdate": kind,
                 "content": { "type": "text", "text": text }
@@ -1773,6 +1816,7 @@ mod tests {
         PendingRecord::Entry(TranscriptEntry {
             t,
             k: EntryKind::Prompt,
+            steer: false,
             p: serde_json::json!([{ "type": "text", "text": text }]),
         })
     }
@@ -1781,6 +1825,7 @@ mod tests {
         PendingRecord::Entry(TranscriptEntry {
             t,
             k: EntryKind::TurnEnd,
+            steer: false,
             p: serde_json::json!({ "stopReason": "end_turn" }),
         })
     }
@@ -1803,6 +1848,7 @@ mod tests {
             PendingRecord::Entry(TranscriptEntry {
                 t,
                 k: EntryKind::Update,
+                steer: false,
                 p: serde_json::json!({
                     "sessionUpdate": "tool_call", "toolCallId": id,
                     "title": "Bash", "kind": "execute", "status": status
@@ -1813,6 +1859,7 @@ mod tests {
             PendingRecord::Entry(TranscriptEntry {
                 t,
                 k: EntryKind::Update,
+                steer: false,
                 p: serde_json::json!({
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type": "image", "data": "AAA", "mimeType": "image/png"}
@@ -1823,6 +1870,7 @@ mod tests {
             PendingRecord::Entry(TranscriptEntry {
                 t,
                 k: EntryKind::Update,
+                steer: false,
                 p: serde_json::json!({
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type": "resource_link", "uri": "file:///a", "name": "a"}
@@ -2016,6 +2064,7 @@ mod tests {
             PendingRecord::Entry(TranscriptEntry {
                 t,
                 k: EntryKind::Update,
+                steer: false,
                 p: serde_json::json!({
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type": "text", "text": "x"},

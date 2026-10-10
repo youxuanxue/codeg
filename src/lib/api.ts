@@ -5276,6 +5276,30 @@ export async function setCodegMcpToolGroup(
   return getTransport().call("set_codeg_mcp_tool_group", { key, enabled })
 }
 
+// ─── Generative UI (json-render) ───────────────────────────────────────
+
+/** Mirror of Rust `GenerativeUiSettings`. */
+export interface GenerativeUiSettings {
+  enabled: boolean
+  /** Reported, never saved: the central skill store holds a `json-render`
+   *  skill the user made, so Codeg leaves the skill alone until it is
+   *  renamed. */
+  skill_conflict: boolean
+  /** Reported by a switch-off, never saved: links it could not remove, as
+   *  `path: error`. Empty everywhere else. */
+  unlink_failures: string[]
+}
+
+export async function getGenerativeUiSettings(): Promise<GenerativeUiSettings> {
+  return getTransport().call("get_generative_ui_settings")
+}
+
+export async function setGenerativeUiSettings(
+  settings: Pick<GenerativeUiSettings, "enabled">
+): Promise<GenerativeUiSettings> {
+  return getTransport().call("set_generative_ui_settings", { settings })
+}
+
 // ─── Live feedback settings + submit ───────────────────────────────────
 
 /** Mirror of Rust `FeedbackSettings`. */
