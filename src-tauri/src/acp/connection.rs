@@ -3666,15 +3666,33 @@ fn merge_claude_model_catalog(
     if rows.is_empty() {
         return;
     }
-    match &mut select.options {
-        SessionConfigSelectOptions::Ungrouped(existing) => existing.extend(rows),
-        SessionConfigSelectOptions::Grouped(groups) => groups.push(SessionConfigSelectGroup::new(
+    // Always keep injected ids in a labeled group so the UI distinguishes
+    // gateway catalog entries from the agent's built-in aliases — including
+    // when the adapter originally advertised an ungrouped list.
+    select.options = match std::mem::replace(
+        &mut select.options,
+        SessionConfigSelectOptions::Ungrouped(Vec::new()),
+    ) {
+        SessionConfigSelectOptions::Ungrouped(existing) => SessionConfigSelectOptions::Grouped(
+            vec![
+                SessionConfigSelectGroup::new("built-in", "Built-in", existing),
+                SessionConfigSelectGroup::new("cc-switch", "cc-switch provider", rows),
+            ],
+        ),
+        SessionConfigSelectOptions::Grouped(mut groups) => {
+            groups.push(SessionConfigSelectGroup::new(
+                "cc-switch",
+                "cc-switch provider",
+                rows,
+            ));
+            SessionConfigSelectOptions::Grouped(groups)
+        }
+        _ => SessionConfigSelectOptions::Grouped(vec![SessionConfigSelectGroup::new(
             "cc-switch",
             "cc-switch provider",
             rows,
-        )),
-        _ => select.options = SessionConfigSelectOptions::Ungrouped(rows),
-    }
+        )]),
+    };
 }
 
 /// Config-option ids a launch carrying `runtime_env` has pinned, so the agent
@@ -21053,6 +21071,54 @@ mod tests {
             SessionConfigKindInfo::Select(sel) => sel,
             other => panic!("expected a select config option, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn merge_claude_model_catalog_promotes_ungrouped_and_skips_duplicates() {
+        let mut options: Vec<SessionConfigOption> = vec![serde_json::from_value(serde_json::json!({
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "sonnet",
+            "options": [
+                {"value": "sonnet", "name": "Sonnet"},
+                {"value": "opus", "name": "Opus"},
+            ],
+        }))
+        .expect("fixture")];
+
+        merge_claude_model_catalog(
+            &mut options,
+            &[
+                (
+                    "sonnet".to_string(),
+                    "Sonnet".to_string(),
+                    Some("cc-switch provider catalog".to_string()),
+                ),
+                (
+                    "claude-opus-5-5".to_string(),
+                    "Opus 5.5".to_string(),
+                    Some("cc-switch provider catalog".to_string()),
+                ),
+            ],
+        );
+
+        let SessionConfigKind::Select(select) = &options[0].kind else {
+            panic!("expected select");
+        };
+        let SessionConfigSelectOptions::Grouped(groups) = &select.options else {
+            panic!("ungrouped catalog merge must promote to grouped: {:?}", select.options);
+        };
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].group.to_string(), "built-in");
+        assert_eq!(groups[1].group.to_string(), "cc-switch");
+        let injected: Vec<String> = groups[1]
+            .options
+            .iter()
+            .map(|row| row.value.to_string())
+            .collect();
+        assert_eq!(injected, vec!["claude-opus-5-5"]);
     }
 
     // ── PermissionQueue (#442) ──────────────────────────────────────────────

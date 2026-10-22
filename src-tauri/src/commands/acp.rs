@@ -11229,8 +11229,10 @@ pub(crate) async fn build_session_runtime_env(
 /// Work-task sessions carry their own ACP selections. On a reconnect the chat
 /// surface also supplies the user's global selector preferences; letting those
 /// win would silently turn a task saved as `high` back into the global default
-/// (`medium`). Resolve the task by the external ACP session id and give its
-/// explicit override precedence over the global reconnect preferences.
+/// (`medium`). Resolve the task by the external ACP session id and mirror
+/// [`crate::work_task::engine`]'s `effective_agent_config`: an explicit task
+/// agent override keeps the task's mode/config; an inherited agent (`None`)
+/// keeps the folder work-task settings that launch already used.
 pub(crate) async fn task_session_preferences(
     db: &AppDatabase,
     agent_type: AgentType,
@@ -11264,14 +11266,19 @@ pub(crate) async fn task_session_preferences(
     let Ok(config) = serde_json::from_str::<crate::models::WorkTaskConfig>(&task.config) else {
         return (preferred_mode_id, preferred_config_values);
     };
-    if config
-        .agent_type
-        .as_deref()
-        .is_some_and(|configured_agent| configured_agent == agent.as_ref())
-    {
-        return (config.mode_id, config.config_values);
+    match config.agent_type.as_deref() {
+        Some(configured) if configured == agent.as_ref() => {
+            (config.mode_id, config.config_values)
+        }
+        Some(_) => (preferred_mode_id, preferred_config_values),
+        None => {
+            let settings =
+                crate::db::service::work_task_service::settings_get_effective(&db.conn, task.folder_id)
+                    .await
+                    .unwrap_or_default();
+            (settings.mode_id, settings.config_values)
+        }
     }
-    (preferred_mode_id, preferred_config_values)
 }
 
 /// Settings may inspect Pi's local model catalog while the agent is disabled.
@@ -21452,5 +21459,284 @@ model = "gpt"
             Some(&serde_json::json!({ "apiProvider": "deepseek", "apiKey": "sk" }).to_string()),
         );
         assert_eq!(env.get("CLINE_PROVIDER").map(String::as_str), Some("cline-pass"));
+    }
+
+    #[test]
+    fn normalize_catalog_url_strips_trailing_slash_and_v1() {
+        assert_eq!(
+            normalize_catalog_url(" https://gw.example/v1/ "),
+            "https://gw.example"
+        );
+        assert_eq!(
+            normalize_catalog_url("https://gw.example/v1"),
+            "https://gw.example"
+        );
+        assert_eq!(
+            normalize_catalog_url("https://gw.example/"),
+            "https://gw.example"
+        );
+    }
+
+    #[test]
+    fn cc_switch_claude_model_catalog_matches_key_filters_non_claude_and_dedups() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let models = dir.path().join("models.json");
+        std::fs::write(
+            &models,
+            serde_json::json!({
+                "providers": {
+                    "exact": {
+                        "baseUrl": "https://gw.example/v1",
+                        "apiKey": "sk-exact",
+                        "models": [
+                            {"id": "claude-opus-5-5", "name": "Opus"},
+                            {"id": "gpt-4o", "name": "GPT"},
+                            {"id": "us.anthropic.claude-sonnet-5", "name": "Sonnet"},
+                            {"id": "claude-opus-5-5", "name": "Opus dup"},
+                        ]
+                    },
+                    "other-key": {
+                        "baseUrl": "https://gw.example/v1/",
+                        "apiKey": "sk-other",
+                        "models": [
+                            {"id": "claude-haiku-5-5", "name": "Haiku"}
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write models.json");
+
+        let mut env = BTreeMap::new();
+        env.insert(
+            "PI_CODING_AGENT_DIR".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        );
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://gw.example/v1".to_string(),
+        );
+        env.insert(
+            "ANTHROPIC_AUTH_TOKEN".to_string(),
+            "sk-exact".to_string(),
+        );
+
+        let rows = cc_switch_claude_model_catalog(&env);
+        let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["claude-opus-5-5", "us.anthropic.claude-sonnet-5"],
+            "exact key match must drop the other-key provider and non-claude ids: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn cc_switch_claude_model_catalog_falls_back_to_endpoint_when_key_mismatches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("models.json"),
+            serde_json::json!({
+                "providers": {
+                    "a": {
+                        "baseUrl": "https://gw.example",
+                        "apiKey": "sk-a",
+                        "models": [{"id": "claude-opus-5-5", "name": "Opus"}]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write");
+
+        let mut env = BTreeMap::new();
+        env.insert(
+            "PI_CODING_AGENT_DIR".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        );
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://gw.example/v1".to_string(),
+        );
+        env.insert(
+            "ANTHROPIC_AUTH_TOKEN".to_string(),
+            "sk-codeg-client".to_string(),
+        );
+
+        let rows = cc_switch_claude_model_catalog(&env);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "claude-opus-5-5");
+    }
+
+    #[tokio::test]
+    async fn task_session_preferences_prefer_explicit_task_override() {
+        use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
+        use sea_orm::ActiveModelTrait;
+
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/task-prefs-explicit").await;
+        let conv = crate::db::service::conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            None,
+            None,
+        )
+        .await
+        .expect("conversation");
+        crate::db::service::conversation_service::bind_external_id(
+            &db.conn,
+            conv.id,
+            "sess-explicit",
+            &[],
+        )
+        .await
+        .expect("bind");
+        let task = crate::db::service::work_task_service::create(
+            &db.conn,
+            crate::models::WorkTaskDraft {
+                folder_id,
+                title: "t".to_string(),
+                config: serde_json::json!({
+                    "display_text": "t",
+                    "prompt_blocks": [{"type":"text","text":"t"}],
+                    "agent_type": "claude_code",
+                    "mode_id": "high",
+                    "config_values": {"model": "claude-opus-5-5"},
+                }),
+            },
+        )
+        .await
+        .expect("task");
+        let model = crate::db::service::work_task_service::get_model(&db.conn, task.id)
+            .await
+            .expect("model");
+        let mut active: crate::db::entities::work_task::ActiveModel = model.into();
+        active.conversation_id = sea_orm::Set(Some(conv.id));
+        active.update(&db.conn).await.expect("link");
+
+        let mut global = BTreeMap::new();
+        global.insert("model".to_string(), "claude-sonnet-5-5".to_string());
+        let (mode, config) = task_session_preferences(
+            &db,
+            AgentType::ClaudeCode,
+            Some("sess-explicit"),
+            Some("medium".to_string()),
+            global,
+        )
+        .await;
+        assert_eq!(mode.as_deref(), Some("high"));
+        assert_eq!(config.get("model").map(String::as_str), Some("claude-opus-5-5"));
+    }
+
+    #[tokio::test]
+    async fn task_session_preferences_inherit_folder_settings_when_agent_unset() {
+        use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
+        use sea_orm::ActiveModelTrait;
+
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/task-prefs-inherit").await;
+        crate::db::service::work_task_service::settings_set(
+            &db.conn,
+            folder_id,
+            &crate::models::WorkTaskFolderSettings {
+                default_agent_type: Some("claude_code".to_string()),
+                mode_id: Some("high".to_string()),
+                config_values: BTreeMap::from([(
+                    "model".to_string(),
+                    "claude-opus-5-5".to_string(),
+                )]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("settings");
+        let conv = crate::db::service::conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            None,
+            None,
+        )
+        .await
+        .expect("conversation");
+        crate::db::service::conversation_service::bind_external_id(
+            &db.conn,
+            conv.id,
+            "sess-inherit",
+            &[],
+        )
+        .await
+        .expect("bind");
+        let task = crate::db::service::work_task_service::create(
+            &db.conn,
+            crate::models::WorkTaskDraft {
+                folder_id,
+                title: "t".to_string(),
+                config: serde_json::json!({
+                    "display_text": "t",
+                    "prompt_blocks": [{"type":"text","text":"t"}],
+                }),
+            },
+        )
+        .await
+        .expect("task");
+        let model = crate::db::service::work_task_service::get_model(&db.conn, task.id)
+            .await
+            .expect("model");
+        let mut active: crate::db::entities::work_task::ActiveModel = model.into();
+        active.conversation_id = sea_orm::Set(Some(conv.id));
+        active.update(&db.conn).await.expect("link");
+
+        let mut global = BTreeMap::new();
+        global.insert("model".to_string(), "claude-sonnet-5-5".to_string());
+        let (mode, config) = task_session_preferences(
+            &db,
+            AgentType::ClaudeCode,
+            Some("sess-inherit"),
+            Some("medium".to_string()),
+            global,
+        )
+        .await;
+        assert_eq!(mode.as_deref(), Some("high"));
+        assert_eq!(config.get("model").map(String::as_str), Some("claude-opus-5-5"));
+    }
+
+    #[tokio::test]
+    async fn task_session_preferences_leave_non_task_sessions_alone() {
+        use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
+
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/task-prefs-plain").await;
+        let conv = crate::db::service::conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            None,
+            None,
+        )
+        .await
+        .expect("conversation");
+        crate::db::service::conversation_service::bind_external_id(
+            &db.conn,
+            conv.id,
+            "sess-plain",
+            &[],
+        )
+        .await
+        .expect("bind");
+
+        let mut global = BTreeMap::new();
+        global.insert("model".to_string(), "claude-sonnet-5-5".to_string());
+        let (mode, config) = task_session_preferences(
+            &db,
+            AgentType::ClaudeCode,
+            Some("sess-plain"),
+            Some("medium".to_string()),
+            global.clone(),
+        )
+        .await;
+        assert_eq!(mode.as_deref(), Some("medium"));
+        assert_eq!(config, global);
     }
 }
