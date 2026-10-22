@@ -359,11 +359,15 @@ insta = { version = "1", features = ["json", "redactions"] }
 axum-test = { version = "17", features = ["ws"] }
 
 # Keep local debug builds usable while cutting DevCache deps debuginfo
-# (often multi-GiB). Full symbols stay available via `cargo build --profile=…`
-# overrides when needed; release profiles are unchanged.
+# (often multi-GiB). `package."*"` overrides top-level profile for every
+# package including the root, so re-assert line-tables for this crate.
+# Release profiles are unchanged.
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+[profile.dev.package.codeg]
+debug = "line-tables-only"
 
