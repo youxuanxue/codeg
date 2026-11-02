@@ -21,7 +21,7 @@ risk_level: high
 | 任务执行 | codeg `work_task/`、ACP 连接 | 不处理 submodule |
 | worktree | `agent-skills/git-worktree-submodule/scripts/wtree.py`（`create --json`、`remove`、`session-check`） | 无 |
 | headless 约束 | dev-rules `global/CLAUDE.md` §4，`check_workflow_yaml.py` | 无 |
-| 门禁 | dev-rules `templates/preflight.sh`、xj-review、`gh-pr-guard.py` | 本方案 P1 再接 CI |
+| 门禁 | dev-rules `templates/preflight.sh`、xj-review、`gh-pr-guard.py` | 本方案 P1 再接 CI；`gh-pr-guard` 目前没有注册，见 D5 |
 | 飞书 | codeg `chat_channel/backends/lark.rs`（长连接收消息、发卡片） | 卡片按钮回调未实现（`callback_data: None`，`send_interactive_message` 走默认降级） |
 | 出口 IP | infra-skills `cc0`/`codex0`/`agy0` | 无 |
 | 跨项目分发 | `dev-rules-fanout` | 写死 `/Users/xuejiao` 路径，需人工启动 |
@@ -32,7 +32,7 @@ risk_level: high
 - **D2 公网事件**：GitHub/GitLab 改用 Forge 定时扫描（间隔 1 到 2 分钟，`MIN_SCAN_INTERVAL_MINUTES = 1`），不接公网 webhook。飞书走现有长连接，P0 只出站（通知），不处理入站指令；入站指令是 P2。
 - **D3 事件协议**：与 AIHOT 完全兼容（见「事件协议」）。来源按 API key 区分，不信任消息体自报。扩展字段只放可选的 `meta`。
 - **D4 worktree 单一 owner**：带 submodule 的仓库由 codeg 调 `wtree.py create --json` / `remove`，codeg 不再自己实现 submodule 处理。不带 submodule 的仓库保持现状。zhifu 自身挂着 `dev-rules` submodule，所以第一个场景就会走 wtree.py 这条路径。
-- **D5 合并**：P0 不自动合并。P1 先全部推卡片跑两周，再按白名单放开（见「合并策略」）。Agent 永远不执行合并，`gh-pr-guard` 照旧生效。
+- **D5 合并**：P0 不自动合并。P1 先全部推卡片跑两周，再按白名单放开（见「合并策略」）。Agent 不执行合并，但这条约束**目前没有机制支撑**：2026-11-03 核对，`~/.claude/settings.json` 没有 `hooks` 键，`permissions` 的 allow/deny 为空，`defaultMode` 是 `bypassPermissions`，`gh-pr-guard.py` 躺在 `~/.claude/hooks/` 里但没有注册；dev-rules 和 codeg 的 main 没有分支保护，zhifu 因私有仓库且无 GitHub Pro，保护接口返回 403。因此任何 `mode: auto` 规则启用之前，必须先注册该 hook 并实测拦截（前置项 9）。hook 只对 Claude Code 有效，所以 P0 的规则只允许 `to.agent = claude`。
 - **D6 Tailscale 与 ClashX 共存**（`100.64.0.0/10`、MagicDNS `100.100.100.100`、`*.ts.net` 直连，不进 fake-ip）由 infra-skills 负责。已完成：`youxuanxue/infra-skills` PR #33 已于 2026-11-02 合并。
 - **D7 Thread 订阅直通**：事件的 `subject` 作为 Thread 键。任务启动后订阅对应 Thread，同一 Thread 的后续事件由程序直接送给原任务，不再走规则匹配（见「Thread 订阅」）。P0 的首个场景是「一个事件对应一个独立任务」，没有后续事件，所以订阅直通放到 P1 实现。
 - **D8 规则级 `mode`**：每条规则有 `off`、`observe`、`auto` 三档。新规则先 `observe`，只记录「本来会做什么」，不执行；看过记录再切 `auto`。
@@ -146,7 +146,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 `feishu_chat` 为 `null` 表示该项目还没有专属群，通知发到总览群。以后接入 sub2api、ai4s 时，往 `projects` 里加一项即可，格式相同。
 
 - `cwd` 必须是已有的 git 仓库，并且已登记在 dev-rules 的 `.registered-projects`；`feishu_chat` 非空时在注册表内不能重复，并且不能等于 `overview_chat`；规则里的 `project` 必须存在于注册表。校验失败时继续使用旧文件，并通过 `/tell` 向总览群报错。
-- **项目到 codeg 文件夹的映射**：`work_task` 需要 `folder_id`。中台启动和热加载时，按 `cwd` 找到对应的 codeg 文件夹（没有则登记，入口大概率是 `folder_service::add_folder`，实现前核实它对已存在路径是否幂等）。找不到或登记失败，校验失败。
+- **项目到 codeg 文件夹的映射**：`work_task` 需要 `folder_id`。中台启动和热加载时，按 `cwd` 找到对应的 codeg 文件夹（没有则登记，用 `folder_service::add_folder`：按路径幂等，已存在时只刷新名称和打开状态、清除软删除标记，不改父子关系，见 `db/service/folder_service.rs`）。找不到或登记失败，校验失败。
 - 出口 IP / 启动器（cc0、codex0）：我没有核实 `build_runtime_env_for_agent` 能否按规则选择启动器，所以 P0 的规则里不提供 `launcher` 字段，沿用 codeg 的 Agent 全局运行环境设置。能否按规则选择，列入待核实项。
 - 项目的通知一律带项目名：卡片标题以 `[sub2api]` 开头，任务记录里也带 `project`，方便在总览里按项目筛。
 - 总览群收三类消息：每日跨项目汇总、Watchdog 告警、找不到项目的 `unrouted` 事件摘要。
@@ -186,7 +186,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 | `enabled` | 否，默认 `true` | `false` 表示停用，不必删除规则 |
 | `mode` | 否，默认 `observe` | `off`：不匹配；`observe`：命中后只记录「本来会做什么」，不创建任务、不执行；`auto`：执行 |
 | `when` | 是 | `source` 精确匹配，`types` 取其一；可选 `subject_prefix` |
-| `to` | 是 | `agent`：codeg 里已配置的 Agent 类型（如 `claude`、`codex`），对应任务配置的 `agent_type` |
+| `to` | 是 | `agent`：codeg 里已配置的 Agent 类型，对应任务配置的 `agent_type`。P0 只允许 `claude`（原因见 D5） |
 | `acp` | 否 | 与 `WorkTaskConfig` 的 `mode_id`、`config_values` 同形，用来选权限模式、模型、推理深度等；省略则继承该文件夹的设置。模型和推理深度对应哪些 `config_values` 键因 Agent 而异，实现前以 ACP 返回的选项为准 |
 | `project` / `cwd` / `worktree` | `project` 与 `cwd` 二选一 | `project` 引用项目注册表（推荐），同时决定通知发到哪个群；`cwd` 直接写路径，通知发到总览群。`worktree` 取 `wtree`（默认，由 wtree.py 新建）或 `none`（只读任务，直接在目录里执行） |
 | `skill` / `ask` | 是 | 要用的 skill 和一句指令。`ask` 只能引用 `{{id}}`、`{{type}}`、`{{subject}}`，这三个字段的字符集受限（`[A-Za-z0-9#._:/@-]`），不能带注入文本。`summary`、`detail`、`link`、`meta` 一律不进指令，放进 hub 信封单独附上 |
@@ -195,18 +195,21 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 | `timeout_minutes` | 否，默认 `30` | 单个任务的最长运行时间，到点由中台取消并通过 `/tell` 报告（取消入口实现前核实）。这是 P0 唯一由中台自己执行的限制，见「执行」 |
 | `tell` | 否，默认 `needed` | `never`；`needed`（只在 Agent 报告需要决策、受阻或失败时通知）；`always` |
 
-校验失败的情形：`when.source` 以 `forge:` 开头（Forge 的 issue 和 PR 只由 Forge 自己处理，D11，避免同一件事被两套规则各建一个任务）；`project` 不在注册表里；`skill` 在 agent-skills 里不存在；`ask` 引用了 `id`、`type`、`subject` 之外的字段；`name` 重名；`risk` 不在 `low`、`regular`、`high` 里。
+校验失败的情形：`when.source` 以 `forge:` 开头（Forge 的 issue 和 PR 只由 Forge 自己处理，D11，避免同一件事被两套规则各建一个任务）；`to.agent` 不是 `claude`（P0）；`project` 不在注册表里；`skill` 在 agent-skills 里不存在；`ask` 引用了 `id`、`type`、`subject` 之外的字段；`name` 重名；`risk` 不在 `low`、`regular`、`high` 里。
 
 一个事件先看有没有存活的订阅（见「Thread 订阅」），没有再按顺序匹配规则，只命中第一条 `enabled` 且 `mode` 不是 `off` 的规则。`mode: observe` 命中的事件状态记为 `observed`，并在记录里写明本来会用的 Agent、cwd 和 `ask`；这类事件不通知人，只在管理界面和每日汇总里出现。命中 `risk: high` 的任务，在执行前也要先推卡片等人确认。P0 没有按钮回调，这类任务只通知、不执行。
 
 ## 执行
 
-- **来源标记**：hub 创建的任务带 `source_kind = "hub_event"`，来源键为 `hub:<source>:<event id>`。来源只能由中台内部传入，不进 `WorkTaskDraft`（该类型故意不带来源字段，防止客户端伪造）。`engine.rs:6463` 对带 `source_kind` 的任务有一条硬规则：**永远不自动合并**。hub 任务沿用它，正好符合 D5。实现前要逐处核对 `source_kind` 的其他分支（`engine.rs` 里有多处按 `forge_pr` 判断，需确认对 `hub_event` 无副作用）。
+- **来源标记**：hub 创建的任务带 `source_kind = "hub_event"`，来源键为 `hub:<source>:<event id>`。来源只能由中台内部传入，不进 `WorkTaskDraft`（该类型故意不带来源字段，防止客户端伪造）。`engine.rs:6463` 对带 `source_kind` 的任务有一条硬规则：**永远不自动合并**。hub 任务沿用它，正好符合 D5。已逐处核对 `engine.rs` 里 `source_kind` 的其他分支（1841、1942、3836、4322、5096、5218、6275）：都只对 `forge_pr` / `forge_issue` 生效，`hub_event` 落入默认分支，要么直接返回，要么报错「只有 Forge 的 issue 或 PR 触发的任务可以走 Forge 交付」（4322）。后者说明 hub 任务不走 `forge/deliver.rs`，要由 Agent 自己 `git push` 并 `gh pr create`；本地合并仍需人在卡片上点击。数据库层和前端对 `source_kind` 的使用没有查。
 - **任务创建**：通过 `work_task_service::create`（内部参数传来源），任务 prompt 由 skill 加 `ask` 加 hub 信封组成。会话链接写回任务记录，方便从任务直接跳到当时的 Agent 会话。
-- **worktree**：带 submodule 的仓库（zhifu 就是）调 `wtree.py create --json <slug>`（具体参数以实现时 `wtree.py create --help` 为准，已确认的只有输出里有 `session_switch.workdir`），按返回的 `session_switch.workdir` 绑定 cwd，再执行 `wtree.py session-check --expected <workdir>`，通过后才启动 Agent。任务结束后调 `wtree.py remove`。slug 取 `hub-<rule>-<短 id>`。接入点在 `work_task` 创建 worktree 的位置（`git.rs` 的 `worktree add` 一带），实现前先定位。
+- **worktree（接入点已定位）**：任务 worktree 由 `TaskEngine::ensure_worktree`（`work_task/engine.rs:1657`）创建：先记下 base 分支和 sha，再调 `git_worktree_add`（`commands/folders.rs:2161`），分支固定为 `task/<任务 id>`，目录为 `<项目目录名>-task-<任务 id>`，放在该文件夹设置的 `worktree_root` 下；随后 `open_worktree_folder_core` 把它登记成以任务文件夹为父的 worktree 文件夹，`work_task_service::attach_worktree` 记录 `worktree_folder_id`、base 和分支。`work_task/*.rs` 和 `commands/folders.rs` 里没有任何 submodule 处理（搜索 `submodule` 无结果）。
+  - **做法**：只在 `ensure_worktree` 里加一个分支：仓库有 `.gitmodules` 时，用 `wtree.py create --json --repo <根目录> --branch task/<id> --base <记录的 base_sha> <slug>` 代替 `git_worktree_add`，取返回的 `session_switch.workdir` 作为 `wt_path`，后面的登记和 `attach_worktree` 原样不动。这样分支命名和 diff 的 base 都与引擎一致。不抽象成 provider 接口，只有这一处分支。
+  - **要处理的差异**：① `wtree.py` 的 `--branch`、`--base` 与默认目录规则（默认分支名取自 `../<repo>-wt-<name>` 的目录名）以 `create --help` 为准，组合起来的行为实现时实测；目录位置由 wtree 决定，与 `worktree_root` 设置要对齐或明确忽略。② 清理：引擎现有的移除路径（`recreate_worktree_from_branch`、任务删除和取消时的 worktree 移除）不认识 submodule worktree，带 submodule 的任务必须改调 `wtree.py remove --path <路径>`，所有移除点都要覆盖。③ `session-check --expected <workdir>` 在 cwd 等于 workdir 时运行，作为创建后的校验；ACP 任务的 cwd 由引擎直接设定，不依赖会话切换。
+  - 这是 P0 里改动面最大的一块，先单独提 PR，再接事件入口。
 - **P0 的限制手段**（已读代码：`src-tauri/src` 里没有 `max-budget`、`allowedTools` 这类执行机制，ACP 任务可配置的只有 `mode_id` 和 `config_values`）：
   1. `acp.mode_id` 选更严的权限模式；
-  2. 中台自己执行的 `timeout_minutes`；
+  2. 中台自己执行的 `timeout_minutes`（也是无人值守时的兜底：更严的权限模式可能让任务停在等待应答，引擎把这类请求登记为阻塞请求，见 `engine.rs:208`，没人应答就一直等到超时；`mode_id` 的取值和无人值守行为要实测）；
   3. 并发组上限 `parallel`；
   4. 带来源的任务永远不自动合并，且不执行合并；
   5. 一个规则一个项目，任务只写自己的 worktree。
@@ -229,6 +232,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 - 第 1 到 2 周：CI 加审查都通过后，一律推卡片，由人在 GitHub 合并。同时统计每类 PR 的驳回率。
 - 之后放开：只有 `risk: low`、改动路径全在白名单内、CI 全绿、审查没有阻断项的 PR，才由 CI 打上 `automerge` 标签，交给 GitHub auto-merge 合并。
 - 首批白名单：dev-rules 分发产生的 PR（只改 submodule 指针、`.cursor/rules/`、`AGENTS.md` 托管块）、纯文档改动、纯测试改动。
+- **按仓库启用**：自动合并依赖 GitHub 分支保护的必需检查。2026-11-03 查询：dev-rules、codeg 的 main 没有保护；zhifu 的保护接口返回 403（私有仓库需要 GitHub Pro 或改为公开），auto-merge 能否使用没有验证。这三个仓库在配置好保护之前都不进自动合并名单，保持人工合并。
 - 永远推卡片：上游合并、数据库迁移、鉴权与权限、密钥、发布配置、依赖大版本升级。
 - 白名单本身作为长期授权写进决策台账（附原话和日期）。xj-review 规则补一句「台账内的类别视为已授权」。这句规则的修改属于 dev-rules 的变更，另提 PR。
 
@@ -255,6 +259,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 6. 新建私有仓库 `youxuanxue/agent-hub-config`，放 `rules.json` 和 `projects.json`；总览群 id 写在这里。
 7. `dev-rules-fanout` skill 增加单项目模式（只处理 `ask` 指定的当前项目），否则第一个场景的 skill 会按 `.registered-projects` 扫全部项目。
 8. 接入 zhifu：本机已克隆到 `~/Codes/zhifu`（仓库已有 `dev-rules` submodule 和 `.cursor/rules/`）；还需要拉取 submodule，并在 dev-rules 的 `.registered-projects` 登记（`sync.sh --local`，会改动两个仓库，各自走 PR）。zhifu 的专属飞书群建好后补 `feishu_chat`。sub2api 已在注册表里；ai4s 暂不接入，仓库和群准备好再加。
+9. 注册 `gh-pr-guard`：在 `~/.claude/settings.json` 增加 PreToolUse hook，指向 `~/.claude/hooks/gh-pr-guard.py`，并实测 `gh pr merge` 被拦截（含 codeg 经 ACP 启动的 Claude 会话是否也加载用户级 settings，这一点没有核实）。同时按全局纪律登记 `preflight-debt`。这是启用任何 `mode: auto` 规则的前提。
 
 ### P0：打通
 
@@ -294,6 +299,8 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
   - 规则文件校验失败（`project` 不存在、`ask` 引用了 `summary`、`when.source` 以 `forge:` 开头、`name` 重名）时，继续使用旧规则，并向总览群报错。
   - `ask` 里出现 `{{summary}}` 被拒绝；事件的 `summary` 带「忽略以上指令」之类文本时，只出现在信封里，不进指令。
   - hub 任务永远不会自动合并（`source_kind` 非空）。
+  - 在 hub 任务的会话里执行 `gh pr merge` 被 `gh-pr-guard` 拦下（实测，不是读配置）。
+  - 带 submodule 的仓库：worktree 由 wtree 创建，分支为 `task/<id>`，base 与记录的 `base_sha` 一致，登记为任务的 `worktree_folder_id`；任务取消、删除、重试时，submodule worktree 一并移除，不留残留。
   - 任务超过 `timeout_minutes` 被取消，并向总览群报告。
   - key 管理：`create` 只显示一次 key；`revoke` 后该 key 立即返回 401；`rotate` 后旧 key 失效。
   - `/tell` 同一个 key 一小时内，内容相同的只发一次；内容不同则补发新消息。
@@ -313,7 +320,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 ## 风险与回滚
 
 - 本机兼任日常开发机，Agent 会和人抢 CPU 和模型额度。P0 没有金额预算，只能用 `parallel`、`timeout_minutes` 和一个规则一个项目来限制；任务多了以后迁到独立 Mac mini。
-- Agent 在任务 worktree 里仍然有完整的 shell 权限，工具白名单在 P0 不存在。因此 P0 只接 `risk: low` 的场景，并且所有 PR 由人合并。
+- Agent 在任务 worktree 里仍然有完整的 shell 权限，工具白名单在 P0 不存在。因此 P0 只接 `risk: low` 的场景，所有 PR 由人合并，而「Agent 不合并」要靠已注册并实测过的 `gh-pr-guard` 来保证，不靠约定。
 - 关机或重启期间 `/events` 收不到事件。能否补回取决于来源：AIHOT 先存再发、按 `id` 重发，会补投；Forge 扫描恢复后会补扫；dev-rules 检测脚本记录了最近已投递的 sha，恢复后会补发。新来源必须遵守「先存再发、用同一个 `id` 重试」，并在接入验收里证明这一点；做不到的来源不得接入。
 - 功能开关 `CODEG_HUB_ENABLED` 默认关闭。关闭后 `/events` 返回 503，已有的 Forge 自动处理和定时任务不受影响。
 
@@ -324,11 +331,14 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 3. zhifu 专属飞书群的群 id（建群后提供）；sub2api、ai4s 何时接入。
 4. 路由规则放私有仓库 `agent-hub-config`（D12，已建）。该仓库里现有的 `projects.json` 还带着已移除的 `launcher` 字段，下一次提交配置时一并去掉。
 
-**实现前需要核实的项**（本方案没有读到代码或没有实测）：
-- `launcher` 能否按规则作用到 ACP 启动的 Agent（`commands/acp.rs` 的 `build_runtime_env_for_agent`）。
-- 中台取消运行中任务的入口。
-- worktree 守卫是否允许任务按预期写入自己的 worktree 之外的位置；一个规则一个项目时不涉及，但 wtree.py 创建的 submodule worktree 路径要确认在守卫允许的范围内。
-- `folder_service::add_folder` 对已存在路径是否幂等。
-- `source_kind` 在 `engine.rs` 中的全部分支对 `hub_event` 的影响。
+**已核实（2026-11-03，读代码）**：`add_folder` 按路径幂等；取消入口是 `TaskEngine::cancel(task_id, reason)`（`engine.rs:928`），`merging` 状态不能取消，worktree 保留，移除是另一个调用；`engine.rs` 里 `source_kind` 的其他分支对 `hub_event` 无副作用（数据库层和前端未查）；任务 worktree 的创建点是 `ensure_worktree`。
+
+**实现前仍需核实**：
+- codeg 经 ACP 启动的 Claude 会话是否加载 `~/.claude/settings.json` 的 hook（决定 `gh-pr-guard` 对 hub 任务是否生效）。
+- `mode_id` 的取值，以及无人值守时任务是否会停在等待应答。
+- `wtree.py create` 同时给 `--branch` 和 `--base` 的行为，以及目录位置与 `worktree_root` 的关系。
+- 引擎里所有 worktree 移除点，逐个改为认识 submodule worktree。
+- hub 任务里 Agent 自己 `git push` 和 `gh pr create` 所用的凭据来源。
+- `launcher`（cc0、codex0）能否按规则作用到 ACP 启动的 Agent（`commands/acp.rs` 的 `build_runtime_env_for_agent`）。
 - 飞书对同一应用多条长连接的投递规则（P2 入站前）。
-- dev-rules 和 zhifu 是否配置了分支保护。
+- zhifu 能否使用 GitHub auto-merge。
