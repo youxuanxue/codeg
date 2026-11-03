@@ -3,11 +3,13 @@ use std::collections::{HashMap, HashSet};
 #[cfg(feature = "tauri-runtime")]
 use tauri::Manager;
 
+use crate::acp::types::ToolApprovalInfo;
 use crate::app_error::AppCommandError;
 use crate::db::entities::conversation;
 use crate::db::entities::folder::FolderKind;
 use crate::db::service::{
     agent_setting_service, conversation_service, folder_service, import_service, tab_service,
+    tool_approval_service,
 };
 #[cfg(feature = "tauri-runtime")]
 use crate::db::AppDatabase;
@@ -73,8 +75,13 @@ pub(crate) async fn list_all_conversations_core(
 }
 
 /// Blocking Codex list scan: titles map plus the rollout-presence walk.
-type CodexListScan =
-    Result<(HashMap<String, String>, Result<HashSet<String>, std::io::Error>), String>;
+type CodexListScan = Result<
+    (
+        HashMap<String, String>,
+        Result<HashSet<String>, std::io::Error>,
+    ),
+    String,
+>;
 
 /// Map the blocking Codex title+presence scan into list_all inputs.
 ///
@@ -126,8 +133,7 @@ async fn prune_missing_codex_sessions(
         .iter()
         .map(|id| ("codex".to_string(), id.clone()))
         .collect();
-    let pruned =
-        import_service::prune_missing_imported_sessions(conn, &rows, &present).await;
+    let pruned = import_service::prune_missing_imported_sessions(conn, &rows, &present).await;
     finalize_pruned_conversations(emitter, conn, &pruned).await;
 }
 
@@ -212,8 +218,7 @@ pub async fn list_all_conversations(
 ) -> Result<Vec<DbConversationSummary>, AppCommandError> {
     let emitter = EventEmitter::Tauri(app.clone());
     let db = app.state::<AppDatabase>();
-    let chat_channel_manager =
-        app.state::<crate::chat_channel::manager::ChatChannelManager>();
+    let chat_channel_manager = app.state::<crate::chat_channel::manager::ChatChannelManager>();
     list_all_conversations_core(
         &db.conn,
         &emitter,
@@ -605,9 +610,7 @@ pub async fn import_local_conversations_core(
     // bound chat thread — the same treatment the scan and list paths give a
     // title discovered outside codeg. The importing client refetches the list
     // itself, which also covers the newly imported rows.
-    drop(
-        notify_conversation_title_updates(conn, emitter, chat_channel_manager, updated_ids).await,
-    );
+    drop(notify_conversation_title_updates(conn, emitter, chat_channel_manager, updated_ids).await);
 
     Ok(result)
 }
@@ -685,7 +688,9 @@ async fn load_folder_rows(
 fn index_folder_rows(rows: &[ScanFolderRow]) -> HashMap<String, &ScanFolderRow> {
     let mut index: HashMap<String, &ScanFolderRow> = HashMap::new();
     for row in rows {
-        let slot = index.entry(normalize_path_for_matching(&row.path)).or_insert(row);
+        let slot = index
+            .entry(normalize_path_for_matching(&row.path))
+            .or_insert(row);
         if slot.deleted && !row.deleted {
             *slot = row;
         }
@@ -770,7 +775,9 @@ fn build_scan_result(
                 // Reuse the stored row's exact path string so the import-side
                 // add_folder upsert hits the same UNIQUE(path) key instead of
                 // minting a near-duplicate from a trailing-slash/case variant.
-                path: row.map(|r| r.path.clone()).unwrap_or_else(|| raw_path.clone()),
+                path: row
+                    .map(|r| r.path.clone())
+                    .unwrap_or_else(|| raw_path.clone()),
                 name: row
                     .map(|r| r.name.clone())
                     .or_else(|| summary.folder_name.clone())
@@ -805,8 +812,7 @@ fn build_scan_result(
     let mut folders: Vec<ScanFolder> = groups
         .into_values()
         .map(|mut g| {
-            g.sessions
-                .sort_by_key(|s| std::cmp::Reverse(s.started_at));
+            g.sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
             ScanFolder {
                 path: g.path,
                 name: g.name,
@@ -879,17 +885,26 @@ pub async fn scan_importable_sessions_core(
     )
     .await;
 
-    scan_importable_sessions_from_summaries(conn, emitter, chat_channel_manager, summaries).await
+    scan_importable_sessions_from_summaries(
+        conn,
+        emitter,
+        chat_channel_manager,
+        summaries,
+        &crate::paths::codeg_acp_transcripts_root(),
+    )
+    .await
 }
 
 /// Reconcile summaries already collected by the filesystem scan. Keeping this
 /// boundary separate makes the DB refresh and notification behavior testable
-/// without reading the developer's real agent session directories.
+/// without reading the developer's real agent session directories — or codeg's
+/// own ACP transcripts, read from `transcripts_root`.
 async fn scan_importable_sessions_from_summaries(
     conn: &sea_orm::DatabaseConnection,
     emitter: &EventEmitter,
     chat_channel_manager: &crate::chat_channel::manager::ChatChannelManager,
     summaries: Vec<(AgentType, ConversationSummary)>,
+    transcripts_root: &std::path::Path,
 ) -> Result<ScanResult, AppCommandError> {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -909,6 +924,13 @@ async fn scan_importable_sessions_from_summaries(
             .entry((row.agent_type.clone(), external_id))
             .or_insert(live);
         *entry = *entry || live;
+    }
+    // The Claude Code sessions other conversations already count are in codeg
+    // already, and the import skips them (see
+    // `import_service::claude_sessions_counted_in`).
+    let claude = agent_type_db_str(&AgentType::ClaudeCode);
+    for session in import_service::claude_sessions_counted_in(&conv_rows, transcripts_root) {
+        imported_index.insert((claude.clone(), session), true);
     }
 
     // Refresh the already-imported rows in place before answering, then
@@ -951,12 +973,14 @@ pub async fn scan_importable_sessions(
 
 /// Batch-import the selected sessions, creating (or reopening) each target
 /// folder as needed. Test seam for [`import_selected_sessions_core`]: takes the
-/// scanned summaries as input instead of walking the filesystem.
+/// scanned summaries as input instead of walking the filesystem, and reads
+/// codeg's own ACP transcripts from `transcripts_root`.
 pub(crate) async fn import_selected_from_summaries(
     conn: &sea_orm::DatabaseConnection,
     emitter: &EventEmitter,
     summaries: Vec<(AgentType, ConversationSummary)>,
     selections: Vec<SelectedSessionKey>,
+    transcripts_root: &std::path::Path,
 ) -> Result<ImportSelectedResult, AppCommandError> {
     const MAX_ERRORS: usize = 10;
 
@@ -999,6 +1023,10 @@ pub(crate) async fn import_selected_from_summaries(
 
     let folder_rows = load_folder_rows(conn).await?;
     let folder_index = index_folder_rows(&folder_rows);
+    let counted_elsewhere =
+        import_service::claude_sessions_counted_elsewhere(conn, transcripts_root)
+            .await
+            .map_err(AppCommandError::from)?;
 
     let mut result = ImportSelectedResult {
         imported: 0,
@@ -1109,9 +1137,8 @@ pub(crate) async fn import_selected_from_summaries(
         let target_row = folder_index.get(&norm_key).copied();
         let target_folder_id = target_row.map(|row| row.id);
         let existing_parent_id = target_row.and_then(|row| row.parent_id);
-        let target_has_children = target_folder_id.is_some_and(|folder_id| {
-            folder_child_counts.get(&folder_id).copied().unwrap_or(0) > 0
-        });
+        let target_has_children = target_folder_id
+            .is_some_and(|folder_id| folder_child_counts.get(&folder_id).copied().unwrap_or(0) > 0);
         let parent_id = root_key
             .as_ref()
             .and_then(|key| worktree_parents.get(key).copied())
@@ -1175,6 +1202,7 @@ pub(crate) async fn import_selected_from_summaries(
                         folder_id,
                         &items,
                         import_service::DeletedPolicy::Restore,
+                        &counted_elsewhere,
                     )
                     .await;
                 result.imported += tally.imported;
@@ -1196,9 +1224,9 @@ pub(crate) async fn import_selected_from_summaries(
                     restored: tally.restored,
                 });
                 if failed_in_group > 0 && result.errors.len() < MAX_ERRORS {
-                    result
-                        .errors
-                        .push(format!("{target_path}: {failed_in_group} session(s) failed"));
+                    result.errors.push(format!(
+                        "{target_path}: {failed_in_group} session(s) failed"
+                    ));
                 }
                 // Broadcast every touched folder: even a pre-existing row may
                 // have flipped is_open/deleted_at in add_folder, and clients
@@ -1258,7 +1286,14 @@ pub async fn import_selected_sessions_core(
 
     let envs = agent_setting_service::load_agent_envs(conn).await;
     let summaries = import_service::collect_local_summaries(&envs, |_, _, _, _| {}).await;
-    import_selected_from_summaries(conn, emitter, summaries, selections).await
+    import_selected_from_summaries(
+        conn,
+        emitter,
+        summaries,
+        selections,
+        &crate::paths::codeg_acp_transcripts_root(),
+    )
+    .await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -1323,7 +1358,12 @@ fn build_historical_delegation_meta(child: &DbConversationSummary) -> serde_json
     }
     // The child row's title was seeded from the original task text — the same
     // substitute the broker uses for `task_preview` when it resumes a task.
-    if let Some(title) = child.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+    if let Some(title) = child
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
         obj.insert(
             "task_preview".into(),
             serde_json::Value::String(title.into()),
@@ -1454,6 +1494,13 @@ fn parse_resume_task_id(input: &str) -> Option<String> {
 /// an earlier turn). Without this the resumed card would be frozen at the
 /// `running` its ack reported, forever — the child's real outcome landed on the
 /// DB row, not on the resume result.
+///
+/// Any OTHER tool block whose title+args pass [`crate::acp::lifecycle::is_delegation_invocation`]
+/// binds by `tool_use_id` exactly like `delegate_to_agent`. This is what covers
+/// opencode 2.x code mode: the host wraps the MCP call in its `execute` tool, so
+/// the persisted block's title is `execute` and the real invocation lives inside
+/// a JS `code` string. The live path registers those calls through the same
+/// predicate, so replay recognition cannot drift from it.
 fn inject_delegation_meta(turns: &mut [MessageTurn], children: &[DbConversationSummary]) {
     if children.is_empty() {
         return;
@@ -1502,30 +1549,95 @@ fn inject_delegation_meta(turns: &mut [MessageTurn], children: &[DbConversationS
             if meta.is_some() {
                 continue;
             }
-            let child: Option<&DbConversationSummary> =
-                if tool_name.contains("delegate_to_agent") {
-                    tool_use_id.as_deref().and_then(|tu| {
-                        by_parent_tool_use_id
-                            .get(tu)
-                            .or_else(|| {
-                                task_id_by_call
-                                    .get(tu)
-                                    .and_then(|task_id| by_task_id.get(task_id.as_str()))
-                            })
-                            .copied()
-                    })
-                } else if tool_name.contains("resume_delegation") {
-                    input_preview
-                        .as_deref()
-                        .and_then(parse_resume_task_id)
-                        .and_then(|task_id| by_task_id.get(task_id.as_str()).copied())
-                } else {
-                    continue;
-                };
+            let child: Option<&DbConversationSummary> = if tool_name.contains("delegate_to_agent") {
+                tool_use_id.as_deref().and_then(|tu| {
+                    by_parent_tool_use_id
+                        .get(tu)
+                        .or_else(|| {
+                            task_id_by_call
+                                .get(tu)
+                                .and_then(|task_id| by_task_id.get(task_id.as_str()))
+                        })
+                        .copied()
+                })
+            } else if tool_name.contains("resume_delegation") {
+                input_preview
+                    .as_deref()
+                    .and_then(parse_resume_task_id)
+                    .and_then(|task_id| by_task_id.get(task_id.as_str()).copied())
+            } else if crate::acp::lifecycle::is_delegation_invocation(
+                tool_name,
+                input_preview.as_deref(),
+            ) {
+                tool_use_id.as_deref().and_then(|tu| {
+                    by_parent_tool_use_id
+                        .get(tu)
+                        .or_else(|| {
+                            task_id_by_call
+                                .get(tu)
+                                .and_then(|task_id| by_task_id.get(task_id.as_str()))
+                        })
+                        .copied()
+                })
+            } else {
+                continue;
+            };
             if let Some(child) = child {
                 *meta = Some(serde_json::json!({
                     "codeg.delegation": build_historical_delegation_meta(child),
                 }));
+            }
+        }
+    }
+}
+
+/// Where a tool call's approval record rides on its `ToolUse` block, beside
+/// whatever metadata the agent or [`inject_delegation_meta`] put there.
+const APPROVAL_META_KEY: &str = "codeg.approval";
+
+/// Stamp each kept approval onto the tool call it was about, as
+/// `meta["codeg.approval"]`. Transcripts record the call but never how its
+/// permission request was answered, so this is what lets a reopened
+/// conversation draw the same "approved" chip the live one did. Merges into an
+/// existing meta object; a non-object meta (no parser writes one) is left
+/// alone rather than replaced. Records whose call is not in these turns — an id
+/// the transcript spells differently, a call in a sub-agent's own transcript —
+/// simply match nothing.
+fn inject_tool_approvals(turns: &mut [MessageTurn], approvals: &[ToolApprovalInfo]) {
+    if approvals.is_empty() {
+        return;
+    }
+    let by_call: HashMap<&str, &ToolApprovalInfo> = approvals
+        .iter()
+        .map(|a| (a.tool_call_id.as_str(), a))
+        .collect();
+    for turn in turns.iter_mut() {
+        for block in turn.blocks.iter_mut() {
+            let ContentBlock::ToolUse {
+                tool_use_id: Some(tool_use_id),
+                meta,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            let Some(approval) = by_call.get(tool_use_id.as_str()) else {
+                continue;
+            };
+            let stamp = serde_json::json!({
+                "option_kind": approval.option_kind,
+                "option_name": approval.option_name,
+                "origin": approval.origin,
+                "decided_at": approval.decided_at,
+            });
+            match meta {
+                None => {
+                    *meta = Some(serde_json::json!({ APPROVAL_META_KEY: stamp }));
+                }
+                Some(serde_json::Value::Object(map)) => {
+                    map.insert(APPROVAL_META_KEY.to_string(), stamp);
+                }
+                Some(_) => {}
             }
         }
     }
@@ -1546,8 +1658,14 @@ pub async fn get_folder_conversation_core(
         .await
         .map_err(AppCommandError::from)?;
 
-    let (mut turns, session_stats, resolved_ext_id, parsed_title, parsed_model, transcript_watermark) =
-        if let Some(ref ext_id) = summary.external_id {
+    let (
+        mut turns,
+        session_stats,
+        resolved_ext_id,
+        parsed_title,
+        parsed_model,
+        transcript_watermark,
+    ) = if let Some(ref ext_id) = summary.external_id {
         let at = summary.agent_type;
         let eid = ext_id.clone();
         let db_created_at = summary.created_at;
@@ -1722,6 +1840,12 @@ pub async fn get_folder_conversation_core(
         .await
         .unwrap_or_default();
     inject_delegation_meta(&mut turns, &children);
+    // Same best-effort contract: a failed read costs the approval chips, never
+    // the detail load.
+    let approvals = tool_approval_service::list_by_conversation(conn, conversation_id)
+        .await
+        .unwrap_or_default();
+    inject_tool_approvals(&mut turns, &approvals);
 
     Ok((
         DbConversationDetail {
@@ -2351,8 +2475,7 @@ pub(crate) fn spawn_sync_conversation_title_until_current(
     conversation_id: i32,
 ) {
     tokio::spawn(async move {
-        sync_conversation_title_until_current(&conn, &chat_channel_manager, conversation_id)
-            .await;
+        sync_conversation_title_until_current(&conn, &chat_channel_manager, conversation_id).await;
     });
 }
 
@@ -2711,19 +2834,20 @@ pub async fn create_chat_conversation_core(
     // soft-deleting the just-created hidden folder — otherwise it would linger as
     // an orphan (active, conversation-less, never reached by the delete path) and
     // pollute the active-folder scope.
-    let model =
-        match conversation_service::create_chat(conn, folder.id, agent_type, title, None).await {
-            Ok(model) => model,
-            Err(create_err) => {
-                if let Err(cleanup_err) = folder_service::remove_folder(conn, &folder.path).await {
-                    tracing::error!(
+    let model = match conversation_service::create_chat(conn, folder.id, agent_type, title, None)
+        .await
+    {
+        Ok(model) => model,
+        Err(create_err) => {
+            if let Err(cleanup_err) = folder_service::remove_folder(conn, &folder.path).await {
+                tracing::error!(
                         "[conversations] failed to clean up orphan chat folder {} after conversation create error: {cleanup_err}",
                         folder.id
                     );
-                }
-                return Err(AppCommandError::from(create_err));
             }
-        };
+            return Err(AppCommandError::from(create_err));
+        }
+    };
 
     Ok(CreateChatConversationResult {
         conversation_id: model.id,
@@ -2765,7 +2889,9 @@ pub async fn create_chat_conversation(
 /// conversation are still created lazily on first send (reusing this dir).
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn create_chat_dir(app: tauri::AppHandle) -> Result<CreateChatDirResult, AppCommandError> {
+pub async fn create_chat_dir(
+    app: tauri::AppHandle,
+) -> Result<CreateChatDirResult, AppCommandError> {
     use tauri::Manager;
     let data_dir = app
         .path()
@@ -2861,7 +2987,8 @@ pub async fn update_conversation_title(
 ) -> Result<(), AppCommandError> {
     update_conversation_title_core(&db.conn, conversation_id, title).await?;
     emit_conversation_upsert(&EventEmitter::Tauri(app), &db.conn, conversation_id).await;
-    sync_conversation_title_to_channels_core(&db.conn, &chat_channel_manager, conversation_id).await;
+    sync_conversation_title_to_channels_core(&db.conn, &chat_channel_manager, conversation_id)
+        .await;
     Ok(())
 }
 
@@ -2968,8 +3095,12 @@ pub async fn delete_conversation_with_cleanup_core(
     // Canvas references (pinned cards, custom-region memberships) survive the
     // soft delete for the same reason tabs do — no FK cascade ever fires — so
     // they get the same explicit scrub, at the same funnel.
-    crate::commands::canvas::cleanup_canvas_for_deleted_conversation(emitter, conn, conversation_id)
-        .await;
+    crate::commands::canvas::cleanup_canvas_for_deleted_conversation(
+        emitter,
+        conn,
+        conversation_id,
+    )
+    .await;
     if let Some(folder_id) = folder_id {
         cleanup_chat_folder_for_deleted_conversation(conn, folder_id).await;
     }
@@ -3108,7 +3239,7 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: None,
-        agent_message_id: None,
+            agent_message_id: None,
         }
     }
 
@@ -3147,7 +3278,7 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: None,
-        agent_message_id: None,
+            agent_message_id: None,
         }
     }
 
@@ -3166,7 +3297,7 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: completed.then_some(ts),
-        agent_message_id: None,
+            agent_message_id: None,
         }
     }
 
@@ -3186,11 +3317,21 @@ mod tests {
             assistant_text_turn("turn-1", "reply", at(-29), true),
             user_text_turn("turn-2", "hello", at(1)),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
-        assert_eq!(stamped.as_deref(), Some("msg-live"), "reports the stamped id");
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
+        assert_eq!(
+            stamped.as_deref(),
+            Some("msg-live"),
+            "reports the stamped id"
+        );
         assert_eq!(turns[2].id, "msg-live");
-        assert_eq!(turns[0].id, "turn-0", "earlier identical-position turn intact");
+        assert_eq!(
+            turns[0].id, "turn-0",
+            "earlier identical-position turn intact"
+        );
         assert_eq!(turns[1].id, "turn-1");
     }
 
@@ -3209,11 +3350,18 @@ mod tests {
             user_text_turn("turn-0", "hello", at(1)),
             assistant_text_turn("turn-1", "partial...", at(2), true),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped.as_deref(), Some("msg-live"));
         assert_eq!(turns[0].id, "msg-live");
-        assert_eq!(turns.len(), 2, "the partial reply is preserved (not dropped)");
+        assert_eq!(
+            turns.len(),
+            2,
+            "the partial reply is preserved (not dropped)"
+        );
         assert_eq!(turns[1].id, "turn-1", "the partial reply is untouched");
     }
 
@@ -3244,10 +3392,16 @@ mod tests {
             assistant_text_turn("turn-1", "reply", at(-29), true),
             user_text_turn("turn-2", "hello", at(1)),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("turn-0", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("turn-0", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped, None, "colliding broadcast id → no stamp");
-        assert_eq!(turns[2].id, "turn-2", "the in-flight prompt keeps its parser id");
+        assert_eq!(
+            turns[2].id, "turn-2",
+            "the in-flight prompt keeps its parser id"
+        );
         assert_eq!(turns[0].id, "turn-0", "the colliding turn is untouched");
     }
 
@@ -3264,11 +3418,17 @@ mod tests {
             user_text_turn("turn-2", "ok", at(1)),
             assistant_text_turn("turn-3", "b", at(2), false),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped, None, "nothing in the running turn matches");
         assert_eq!(turns[0].id, "turn-0");
-        assert_eq!(turns[2].id, "turn-2", "non-matching tail user turn untouched");
+        assert_eq!(
+            turns[2].id, "turn-2",
+            "non-matching tail user turn untouched"
+        );
     }
 
     #[test]
@@ -3333,15 +3493,13 @@ mod tests {
             user_text_turn("turn-0", "hello", at(1)),
         ];
         for i in 0..400 {
-            turns.push(assistant_text_turn(
-                &format!("a-{i}"),
-                "step",
-                at(2),
-                false,
-            ));
+            turns.push(assistant_text_turn(&format!("a-{i}"), "step", at(2), false));
         }
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped.as_deref(), Some("msg-live"));
         assert_eq!(turns[2].id, "msg-live");
     }
@@ -3358,16 +3516,22 @@ mod tests {
         for i in 0..MAX_IN_FLIGHT_WALK_USER_TURNS {
             turns.push(user_text_turn(&format!("u-{i}"), "filler", parsed_at));
         }
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped, None, "past the cost bound, stamp nothing");
         assert_eq!(turns[0].id, "wanted", "untouched");
 
         // One fewer and the same transcript is inside the bound, so it is the
         // bound that refused above and not some other gate.
         turns.pop();
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped.as_deref(), Some("msg-live"));
     }
 
@@ -3388,8 +3552,11 @@ mod tests {
             assistant_text_turn("turn-1", "a", at(2), false),
             assistant_text_turn("turn-2", "b", at(3), false),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped.as_deref(), Some("msg-live"));
         assert_eq!(turns[0].id, "msg-live");
     }
@@ -3405,8 +3572,11 @@ mod tests {
             assistant_text_turn("turn-1", "first half", at(2), false),
             user_text_turn("turn-2", "also check the tests", at(3)),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped.as_deref(), Some("msg-live"));
         assert_eq!(turns[0].id, "msg-live", "the prompt keeps the stamp");
         assert_eq!(turns[2].id, "turn-2", "the mid-turn message is untouched");
@@ -3458,32 +3628,45 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: None,
-        agent_message_id: None,
+            agent_message_id: None,
         };
-        let pending_image = |message_id: &str, data: &str| {
-            crate::acp::session_state::PendingUserMessage {
+        let pending_image =
+            |message_id: &str, data: &str| crate::acp::session_state::PendingUserMessage {
                 message_id: message_id.into(),
                 blocks: vec![crate::acp::types::UserMessageBlock::Image {
                     data: data.into(),
                     mime_type: "image/png".into(),
                 }],
-            }
-        };
+            };
 
         let mut turns = vec![image_turn("turn-0", "AAAA")];
-        apply_in_flight_message_id(&mut turns, &pending_image("msg-live", "AAAA"), Some(turn_started()));
-        assert_eq!(turns[0].id, "msg-live", "uri difference is ignored, data matches");
+        apply_in_flight_message_id(
+            &mut turns,
+            &pending_image("msg-live", "AAAA"),
+            Some(turn_started()),
+        );
+        assert_eq!(
+            turns[0].id, "msg-live",
+            "uri difference is ignored, data matches"
+        );
 
         let mut turns = vec![image_turn("turn-0", "AAAA")];
-        apply_in_flight_message_id(&mut turns, &pending_image("msg-live", "BBBB"), Some(turn_started()));
+        apply_in_flight_message_id(
+            &mut turns,
+            &pending_image("msg-live", "BBBB"),
+            Some(turn_started()),
+        );
         assert_eq!(turns[0].id, "turn-0", "different image bytes → no stamp");
     }
 
     #[test]
     fn empty_turns_is_a_noop() {
         let mut turns: Vec<MessageTurn> = vec![];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped, None);
         assert!(turns.is_empty());
     }
@@ -3501,7 +3684,11 @@ mod tests {
             user_text_turn("turn-0", "continue", at(-60)),
             assistant_text_turn("turn-1", "done", at(-58), true),
         ];
-        apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "continue"), Some(turn_started()));
+        apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "continue"),
+            Some(turn_started()),
+        );
         assert_eq!(turns[0].id, "turn-0", "older identical prompt → untouched");
     }
 
@@ -3520,8 +3707,15 @@ mod tests {
         // backend broadcasts `UserMessage` before issuing the agent request), so
         // a turn exactly at the start qualifies — the boundary is inclusive.
         let mut turns = vec![user_text_turn("turn-0", "hello", at(0))];
-        apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
-        assert_eq!(turns[0].id, "msg-live", "persisted exactly at the start is in-flight");
+        apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
+        assert_eq!(
+            turns[0].id, "msg-live",
+            "persisted exactly at the start is in-flight"
+        );
     }
 
     #[test]
@@ -3529,8 +3723,15 @@ mod tests {
         // Strict gate, no backward tolerance: a turn even one second before the
         // start belongs to an earlier turn, never the in-flight prompt.
         let mut turns = vec![user_text_turn("turn-0", "hello", at(-1))];
-        apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
-        assert_eq!(turns[0].id, "turn-0", "one second before the start is not in-flight");
+        apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
+        assert_eq!(
+            turns[0].id, "turn-0",
+            "one second before the start is not in-flight"
+        );
     }
 
     #[test]
@@ -3546,11 +3747,67 @@ mod tests {
             user_text_turn("turn-0", "continue", at(-1)),
             assistant_text_turn("turn-1", "done", at(0), true),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "continue"), Some(turn_started()));
-        assert_eq!(stamped, None, "fast prior identical prompt → nothing reported");
-        assert_eq!(turns[0].id, "turn-0", "fast prior identical prompt → untouched");
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "continue"),
+            Some(turn_started()),
+        );
+        assert_eq!(
+            stamped, None,
+            "fast prior identical prompt → nothing reported"
+        );
+        assert_eq!(
+            turns[0].id, "turn-0",
+            "fast prior identical prompt → untouched"
+        );
         assert_eq!(turns.len(), 2, "the prior completed reply is preserved");
+    }
+
+    fn approval_record(tool_call_id: &str, option_kind: &str) -> ToolApprovalInfo {
+        ToolApprovalInfo {
+            tool_call_id: tool_call_id.into(),
+            option_kind: option_kind.into(),
+            option_name: "Always Allow".into(),
+            origin: "chat_channel".into(),
+            decided_at: chrono::DateTime::parse_from_rfc3339("2026-10-22T09:41:12Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }
+    }
+
+    #[test]
+    fn inject_tool_approvals_stamps_the_matching_call() {
+        let mut turns = vec![
+            tool_use_turn(Some("tu-1"), "Bash"),
+            tool_use_turn(Some("tu-2"), "Bash"),
+            tool_use_turn(None, "Bash"),
+        ];
+        inject_tool_approvals(&mut turns, &[approval_record("tu-1", "allow_always")]);
+        let meta = first_block_meta(&turns[0]).expect("stamped");
+        assert_eq!(
+            meta[APPROVAL_META_KEY],
+            serde_json::json!({
+                "option_kind": "allow_always",
+                "option_name": "Always Allow",
+                "origin": "chat_channel",
+                "decided_at": "2026-10-22T09:41:12Z",
+            })
+        );
+        assert!(first_block_meta(&turns[1]).is_none(), "no record, no stamp");
+        assert!(first_block_meta(&turns[2]).is_none());
+    }
+
+    #[test]
+    fn inject_tool_approvals_merges_into_existing_meta() {
+        let mut turns = vec![tool_use_turn(
+            Some("tu-1"),
+            "mcp__codeg-mcp__delegate_to_agent",
+        )];
+        inject_delegation_meta(&mut turns, &[summary_child(42, "tu-1", "completed")]);
+        inject_tool_approvals(&mut turns, &[approval_record("tu-1", "allow_once")]);
+        let meta = first_block_meta(&turns[0]).expect("meta");
+        assert_eq!(meta["codeg.delegation"]["child_conversation_id"], 42);
+        assert_eq!(meta[APPROVAL_META_KEY]["option_kind"], "allow_once");
     }
 
     #[test]
@@ -3568,6 +3825,88 @@ mod tests {
         assert!(
             inner.get("error_code").is_none(),
             "completed has no error_code"
+        );
+    }
+
+    /// opencode 2.x wraps the MCP call in its `execute` tool — the persisted
+    /// block's title is `execute` and the real invocation lives in a JS `code`
+    /// string. Replay binds it by the same predicate the live path registers
+    /// with, so a refreshed card keeps its status mapping and 查看会话.
+    #[test]
+    fn inject_delegation_meta_binds_an_opencode_execute_call() {
+        let code =
+            r#"await tools["codeg-mcp"].delegate_to_agent({ agent_type: "codex", task: `t` })"#;
+        let mut turns = vec![tool_use_turn_with_input(
+            Some("tu-exec-1"),
+            "execute",
+            Some(&serde_json::json!({ "code": code }).to_string()),
+        )];
+        inject_delegation_meta(&mut turns, &[summary_child(42, "tu-exec-1", "completed")]);
+        let inner = first_block_meta(&turns[0])
+            .and_then(|m| m.get("codeg.delegation").cloned())
+            .expect("execute card should be bound");
+        assert_eq!(inner["status"], "completed");
+        assert_eq!(inner["child_conversation_id"], 42);
+        assert_eq!(inner["agent_type"], "codex");
+    }
+
+    /// The binding fallback is the shared closure, not the tool-name branch:
+    /// an `execute` block whose tool_use_id never meets the child row still
+    /// binds through the task id echoed on its own result.
+    #[test]
+    fn inject_delegation_meta_binds_an_execute_call_by_its_task_id() {
+        let code = r#"tools["codeg-mcp"].delegate_to_agent({ agent_type: "zcode", task: `t` })"#;
+        let mut turns = vec![
+            tool_use_turn_with_input(
+                Some("call_exec_2"),
+                "execute",
+                Some(&serde_json::json!({ "code": code }).to_string()),
+            ),
+            tool_result_turn(
+                "call_exec_2",
+                "Delegation successful. task_id=8ff4c14c-740c-4482-b758-8f2091f97063.",
+            ),
+        ];
+        let mut child = summary_child(7, "exec-unmatched-id", "completed");
+        child.delegation_call_id = Some("8ff4c14c-740c-4482-b758-8f2091f97063".into());
+
+        inject_delegation_meta(&mut turns, &[child]);
+
+        let inner = first_block_meta(&turns[0])
+            .and_then(|m| m.get("codeg.delegation").cloned())
+            .expect("execute card should bind via task id");
+        assert_eq!(inner["child_conversation_id"], 7);
+    }
+
+    /// The code-mode shape counts only on opencode's `execute` tool: another
+    /// tool's `code` argument shaped like the call stays unbound, as it never
+    /// registered live.
+    #[test]
+    fn inject_delegation_meta_does_not_bind_another_tools_code_argument() {
+        let code =
+            r#"await tools["codeg-mcp"].delegate_to_agent({ agent_type: "codex", task: `t` })"#;
+        let mut turns = vec![tool_use_turn_with_input(
+            Some("browser-1"),
+            "mcp__playwright__browser_run_code",
+            Some(&serde_json::json!({ "code": code }).to_string()),
+        )];
+        inject_delegation_meta(&mut turns, &[summary_child(42, "browser-1", "completed")]);
+        assert!(first_block_meta(&turns[0]).is_none());
+    }
+
+    /// The shape gate cuts both ways: an `execute` block whose code is not a
+    /// delegation must stay unbound.
+    #[test]
+    fn inject_delegation_meta_does_not_bind_an_unrelated_execute_call() {
+        let mut turns = vec![tool_use_turn_with_input(
+            Some("tu-exec-3"),
+            "execute",
+            Some(r#"{"code":"const x = 1"}"#),
+        )];
+        inject_delegation_meta(&mut turns, &[summary_child(42, "tu-exec-3", "completed")]);
+        assert!(
+            first_block_meta(&turns[0]).is_none(),
+            "a non-delegation execute call must not be bound"
         );
     }
 
@@ -3614,13 +3953,14 @@ mod tests {
                 is_error: false,
                 agent_stats: None,
                 images: Vec::new(),
+                exit_code: None,
             }],
             timestamp: chrono::Utc::now(),
             usage: None,
             duration_ms: None,
             model: None,
             completed_at: None,
-        agent_message_id: None,
+            agent_message_id: None,
         }
     }
 
@@ -3638,7 +3978,11 @@ mod tests {
                  Call get_delegation_status with this id in the task_ids array.",
             ),
         ];
-        let mut child = summary_child(2890, "exec-0fb6db94-3042-4cc4-b492-2edd1804c1fa", "completed");
+        let mut child = summary_child(
+            2890,
+            "exec-0fb6db94-3042-4cc4-b492-2edd1804c1fa",
+            "completed",
+        );
         child.delegation_call_id = Some("8ff4c14c-740c-4482-b758-8f2091f97063".into());
 
         inject_delegation_meta(&mut turns, &[child]);
@@ -3879,7 +4223,7 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: None,
-        agent_message_id: None,
+            agent_message_id: None,
         }];
         let children = vec![summary_child(42, "tu-1", "completed")];
         inject_delegation_meta(&mut turns, &children);
@@ -4259,7 +4603,10 @@ mod tests {
         .await
         .expect("gc");
 
-        assert_eq!(removed, 0, "a fresh dir below the staleness threshold is spared");
+        assert_eq!(
+            removed, 0,
+            "a fresh dir below the staleness threshold is spared"
+        );
         assert!(
             std::path::Path::new(&fresh).is_dir(),
             "fresh dir retained (anti-race)"
@@ -4339,13 +4686,10 @@ mod tests {
         symlink(real.path(), &link).expect("symlink");
 
         // GC runs under the symlinked spelling; the live dir must still be spared.
-        let removed = gc_orphan_chat_dirs_core_with_threshold(
-            &db.conn,
-            &link,
-            std::time::Duration::ZERO,
-        )
-        .await
-        .expect("gc");
+        let removed =
+            gc_orphan_chat_dirs_core_with_threshold(&db.conn, &link, std::time::Duration::ZERO)
+                .await
+                .expect("gc");
 
         assert_eq!(
             removed, 0,
@@ -4511,6 +4855,72 @@ mod tests {
             .await
             .expect("read by session id");
         assert_eq!(by_id.turns.len(), 2);
+    }
+
+    /// A reopened conversation gets back the approvals its live run showed:
+    /// the kept record is stamped onto the transcript's tool call.
+    #[tokio::test]
+    async fn a_reopened_conversation_carries_its_tool_approvals() {
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        let project = config_dir.path().join("projects").join("-approvals-proj");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let session_id = "6b1e2f30-4c5d-4e6f-8a7b-9c0d1e2f3a4b";
+        std::fs::write(
+            project.join(format!("{session_id}.jsonl")),
+            [
+                r#"{"type":"user","timestamp":"2026-10-22T09:40:00.000Z","uuid":"u1","cwd":"/tmp/codeg-approvals-proj","message":{"role":"user","content":[{"type":"text","text":"commit it"}]}}"#,
+                r#"{"type":"assistant","timestamp":"2026-10-22T09:40:05.000Z","uuid":"a1","parentUuid":"u1","message":{"id":"msg_01","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_commit","name":"Bash","input":{"command":"git commit -am wip"}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-10-22T09:41:20.000Z","uuid":"u2","parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_commit","content":"[main 1a2b3c4] wip"}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("write transcript");
+
+        let db = fresh_in_memory_db().await;
+        save_agent_env_json(
+            &db,
+            AgentType::ClaudeCode,
+            &serde_json::json!({ "CLAUDE_CONFIG_DIR": config_dir.path() }).to_string(),
+        )
+        .await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-approvals-proj").await;
+        let conversation_id = create_conversation_core(
+            &db.conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            Some("approvals".into()),
+        )
+        .await
+        .expect("create conversation");
+        conversation_service::bind_external_id(&db.conn, conversation_id, session_id, &[])
+            .await
+            .expect("bind session");
+        tool_approval_service::record(
+            &db.conn,
+            conversation_id,
+            &approval_record("toolu_commit", "allow_always"),
+        )
+        .await
+        .expect("record approval");
+
+        let (detail, _) = get_folder_conversation_core(&db.conn, conversation_id)
+            .await
+            .expect("open conversation");
+        let stamp = detail
+            .turns
+            .iter()
+            .flat_map(|t| t.blocks.iter())
+            .find_map(|b| match b {
+                ContentBlock::ToolUse {
+                    tool_use_id: Some(id),
+                    meta: Some(meta),
+                    ..
+                } if id == "toolu_commit" => meta.get(APPROVAL_META_KEY).cloned(),
+                _ => None,
+            })
+            .expect("the commit carries its approval");
+        assert_eq!(stamp["option_kind"], "allow_always");
+        assert_eq!(stamp["origin"], "chat_channel");
     }
 
     #[tokio::test]
@@ -4790,6 +5200,7 @@ mod tests {
             &emitter,
             &chat_channel_manager,
             vec![summary],
+            no_transcripts(),
         )
         .await
         .expect("scan summaries");
@@ -4858,6 +5269,7 @@ mod tests {
             &emitter,
             &chat_channel_manager,
             vec![],
+            no_transcripts(),
         )
         .await
         .expect("scan");
@@ -4902,6 +5314,115 @@ mod tests {
             Some(HashSet::new()),
             "a successful empty walk still enables prune"
         );
+    }
+
+    /// A custom agent on `package`, saved the way the add form saves one.
+    fn npx_agent_def(id: &str, package: &str) -> crate::acp::custom_registry::CustomAgentDef {
+        use crate::acp::custom_registry::{
+            CustomAgentDef, CustomAgentSpec, CustomDistributionKind, NpxSpec,
+        };
+        CustomAgentDef {
+            registry_id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            version: String::new(),
+            distribution_kind: CustomDistributionKind::Npx,
+            spec: CustomAgentSpec {
+                npx: Some(NpxSpec {
+                    package: package.into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            icon_url: None,
+            skills_shared_store: false,
+            skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
+            supports_mcp: true,
+        }
+    }
+
+    /// The import skips a Claude Code session whose usage a custom agent's
+    /// conversation counts, so the picker must not offer it as new.
+    #[tokio::test]
+    // `hydrate` replaces a process-global map; the lock is held throughout.
+    #[allow(clippy::await_holding_lock)]
+    async fn scan_shows_a_claude_session_a_custom_agent_counts_as_imported() {
+        use crate::acp::custom_registry::{hydrate, hydrate_test_guard};
+        let _guard = hydrate_test_guard();
+        hydrate(&[
+            npx_agent_def(
+                "scan-claude-adapter",
+                "@agentclientprotocol/claude-agent-acp",
+            ),
+            npx_agent_def("scan-other-adapter", "@zed-industries/claude-code-acp"),
+        ]);
+        let db = fresh_in_memory_db().await;
+        let cwd = "/tmp/codeg-scan-counted-elsewhere";
+        let folder_id = seed_folder(&db, cwd).await;
+        for (agent, session) in [
+            ("scan-claude-adapter", "counted"),
+            ("scan-other-adapter", "uncounted"),
+            ("scan-claude-adapter", "deleted"),
+            ("scan-claude-adapter", "carried-on"),
+        ] {
+            let agent = AgentType::custom(agent).unwrap();
+            let row = conversation_service::create(&db.conn, folder_id, agent, None, None)
+                .await
+                .expect("create");
+            conversation_service::bind_external_id(&db.conn, row.id, session, &[])
+                .await
+                .expect("bind");
+            if session == "deleted" {
+                conversation_service::soft_delete(&db.conn, row.id)
+                    .await
+                    .expect("soft delete");
+            }
+        }
+        // The adapter could not load `carried-from` again, so its conversation
+        // went on in `carried-on`, whose transcript continues the first one.
+        let transcripts = tempfile::tempdir().expect("transcripts root");
+        let carried = AgentType::custom("scan-claude-adapter").unwrap();
+        let header =
+            crate::acp_transcript::TranscriptHeader::new(&carried.as_wire(), "carried-on", cwd, 0)
+                .continuing("carried-from");
+        crate::acp_transcript::record_header_in(
+            transcripts.path(),
+            crate::acp::registry::registry_id_for(carried),
+            &header,
+        )
+        .await
+        .expect("record header");
+        let (_broadcaster, emitter) = sync_test_emitter();
+
+        let result = scan_importable_sessions_from_summaries(
+            &db.conn,
+            &emitter,
+            &crate::chat_channel::manager::ChatChannelManager::new(),
+            vec![
+                scan_summary("counted", AgentType::ClaudeCode, Some(cwd), at(0)),
+                scan_summary("uncounted", AgentType::ClaudeCode, Some(cwd), at(1)),
+                scan_summary("deleted", AgentType::ClaudeCode, Some(cwd), at(2)),
+                scan_summary("carried-from", AgentType::ClaudeCode, Some(cwd), at(3)),
+            ],
+            transcripts.path(),
+        )
+        .await
+        .expect("scan summaries");
+        hydrate(&[]);
+
+        let by_id: HashMap<&str, ScanSessionStatus> = result.folders[0]
+            .sessions
+            .iter()
+            .map(|s| (s.external_id.as_str(), s.status))
+            .collect();
+        assert_eq!(by_id["counted"], ScanSessionStatus::Imported);
+        assert_eq!(by_id["carried-from"], ScanSessionStatus::Imported);
+        assert_eq!(by_id["uncounted"], ScanSessionStatus::New);
+        // A deleted conversation counts nothing, so the session imports.
+        assert_eq!(by_id["deleted"], ScanSessionStatus::New);
+        assert_eq!(result.importable_count, 2);
     }
 
     /// The channel half of a title notification must not be on the caller's
@@ -5034,15 +5555,10 @@ mod tests {
         )
         .await;
 
-        notify_conversation_title_updates(
-            &db.conn,
-            &emitter,
-            &chat_channel_manager,
-            vec![row.id],
-        )
-        .await
-        .await
-        .expect("detached title sync task");
+        notify_conversation_title_updates(&db.conn, &emitter, &chat_channel_manager, vec![row.id])
+            .await
+            .await
+            .expect("detached title sync task");
 
         let recorded = title_edits.recorded().await;
         let current = conversation_service::get_by_id(&db.conn, row.id)
@@ -5201,7 +5717,9 @@ mod tests {
 
         let (broadcaster, emitter) = sync_test_emitter();
         let mut rx = broadcaster.subscribe();
-        delete_conversation_core(&db.conn, c1).await.expect("delete");
+        delete_conversation_core(&db.conn, c1)
+            .await
+            .expect("delete");
         cleanup_tabs_for_deleted_conversation(&emitter, &db.conn, c1).await;
 
         let snap = list_opened_tabs_core(&db.conn).await.expect("list");
@@ -5216,7 +5734,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_tabs_for_deleted_conversation_bumps_barrier_without_emitting_when_no_open_tab() {
+    async fn cleanup_tabs_for_deleted_conversation_bumps_barrier_without_emitting_when_no_open_tab()
+    {
         let db = fresh_in_memory_db().await;
         let folder_id = seed_folder(&db, "/tmp/codeg-tab-conv-del-noop").await;
         let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
@@ -5297,7 +5816,9 @@ mod tests {
         assert_eq!(saved.version, 1);
 
         // Server deletes c1 and atomically cleans its tab → v2 (only c2 remains).
-        delete_conversation_core(&db.conn, c1).await.expect("delete c1");
+        delete_conversation_core(&db.conn, c1)
+            .await
+            .expect("delete c1");
         cleanup_tabs_for_deleted_conversation(&EventEmitter::Noop, &db.conn, c1).await;
 
         // A client still on the pre-cleanup version re-saves the OLD set (with c1
@@ -5363,7 +5884,10 @@ mod tests {
         )
         .await
         .expect("stale save returns Ok");
-        assert!(!stale.accepted, "save on the pre-removal version must be rejected");
+        assert!(
+            !stale.accepted,
+            "save on the pre-removal version must be rejected"
+        );
 
         let snap = list_opened_tabs_core(&db.conn).await.expect("list");
         assert!(
@@ -5402,11 +5926,16 @@ mod tests {
 
         // c1 deleted with no persisted c1 tab → zero rows removed, but the
         // version barrier still advances (v1 → v2) and nothing is broadcast.
-        delete_conversation_core(&db.conn, c1).await.expect("delete c1");
+        delete_conversation_core(&db.conn, c1)
+            .await
+            .expect("delete c1");
         let (broadcaster, emitter) = sync_test_emitter();
         let mut rx = broadcaster.subscribe();
         cleanup_tabs_for_deleted_conversation(&emitter, &db.conn, c1).await;
-        assert!(rx.try_recv().is_err(), "zero-row cleanup must not broadcast");
+        assert!(
+            rx.try_recv().is_err(),
+            "zero-row cleanup must not broadcast"
+        );
 
         // A's debounced save (built on v1, still including the now-deleted c1) is
         // rejected by the barrier — c1 must not be persisted as a ghost.
@@ -5445,8 +5974,8 @@ mod tests {
             &crate::chat_channel::manager::ChatChannelManager::new(),
             999_999,
         )
-            .await
-            .expect_err("missing folder must surface as error");
+        .await
+        .expect_err("missing folder must surface as error");
         let msg = format!("{err:?}");
         assert!(
             msg.to_lowercase().contains("not found") || msg.to_lowercase().contains("999999"),
@@ -5588,6 +6117,13 @@ mod tests {
     // sync regardless of which transport made the change. Drive the helpers
     // directly against a test broadcaster and assert the emitted JSON.
     // ──────────────────────────────────────────────────────────────────────
+
+    /// The ACP transcripts root for import tests with no transcript to read:
+    /// one is read only for a conversation of a custom agent on the official
+    /// Claude adapter.
+    fn no_transcripts() -> &'static std::path::Path {
+        std::path::Path::new("/nonexistent/codeg-test-acp-transcripts")
+    }
 
     fn sync_test_emitter() -> (
         std::sync::Arc<crate::web::event_bridge::WebEventBroadcaster>,
@@ -6184,6 +6720,7 @@ mod tests {
                 key_of(AgentType::ClaudeCode, "s1"),
                 key_of(AgentType::Codex, "s2"),
             ],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6200,11 +6737,65 @@ mod tests {
             .unwrap();
         assert_eq!(folder_rows.len(), 1);
         assert_eq!(folder_rows[0].path, "/tmp/proj-a");
-        assert!(folder_rows[0].is_open, "created folder must open in sidebar");
+        assert!(
+            folder_rows[0].is_open,
+            "created folder must open in sidebar"
+        );
 
         let convs = conversation::Entity::find().all(&db.conn).await.unwrap();
         assert_eq!(convs.len(), 2);
         assert!(convs.iter().all(|c| c.folder_id == folder_rows[0].id));
+    }
+
+    /// A Claude Code session whose usage a custom agent's conversation already
+    /// counts stays out even when a request names it.
+    #[tokio::test]
+    // `hydrate` replaces a process-global map; the lock is held throughout.
+    #[allow(clippy::await_holding_lock)]
+    async fn batch_import_skips_a_claude_session_a_custom_agent_counts() {
+        use crate::acp::custom_registry::{hydrate, hydrate_test_guard};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let _guard = hydrate_test_guard();
+        hydrate(&[npx_agent_def(
+            "batch-claude-adapter",
+            "@agentclientprotocol/claude-agent-acp",
+        )]);
+        let db = fresh_in_memory_db().await;
+        let cwd = "/tmp/proj-counted";
+        let folder_id = seed_folder(&db, cwd).await;
+        let agent = AgentType::custom("batch-claude-adapter").unwrap();
+        let row = conversation_service::create(&db.conn, folder_id, agent, None, None)
+            .await
+            .expect("create");
+        conversation_service::bind_external_id(&db.conn, row.id, "counted", &[])
+            .await
+            .expect("bind");
+
+        let result = import_selected_from_summaries(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![
+                scan_summary("counted", AgentType::ClaudeCode, Some(cwd), at(0)),
+                scan_summary("fresh", AgentType::ClaudeCode, Some(cwd), at(1)),
+            ],
+            vec![
+                key_of(AgentType::ClaudeCode, "counted"),
+                key_of(AgentType::ClaudeCode, "fresh"),
+            ],
+            no_transcripts(),
+        )
+        .await
+        .expect("batch import");
+        hydrate(&[]);
+
+        assert_eq!((result.imported, result.skipped), (1, 1));
+        let claude_rows = conversation::Entity::find()
+            .filter(conversation::Column::AgentType.eq("claude_code"))
+            .all(&db.conn)
+            .await
+            .unwrap();
+        assert_eq!(claude_rows.len(), 1);
+        assert_eq!(claude_rows[0].external_id.as_deref(), Some("fresh"));
     }
 
     // A session whose cwd is a linked git worktree of an open repo belongs
@@ -6231,6 +6822,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6280,6 +6872,7 @@ mod tests {
                 key_of(AgentType::Codex, "s0"),
                 key_of(AgentType::Codex, "s1"),
             ],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6338,6 +6931,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6387,6 +6981,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6446,6 +7041,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6503,6 +7099,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6548,6 +7145,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6592,6 +7190,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6630,6 +7229,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6662,6 +7262,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::ClaudeCode, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6709,6 +7310,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::ClaudeCode, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6745,6 +7347,7 @@ mod tests {
             &EventEmitter::Noop,
             make(),
             vec![key_of(AgentType::ClaudeCode, "s1")],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6758,6 +7361,7 @@ mod tests {
                 key_of(AgentType::ClaudeCode, "s1"),
                 key_of(AgentType::Codex, "does-not-exist"),
             ],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6768,8 +7372,9 @@ mod tests {
 
     #[tokio::test]
     async fn batch_import_restores_a_deleted_conversation_in_place() {
-        use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
-            Set};
+        use sea_orm::{
+            ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
+        };
         let db = fresh_in_memory_db().await;
 
         let make = || {
@@ -6785,6 +7390,7 @@ mod tests {
             &EventEmitter::Noop,
             make(),
             vec![key_of(AgentType::ClaudeCode, "s1")],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6809,6 +7415,7 @@ mod tests {
             &EventEmitter::Noop,
             make(),
             vec![key_of(AgentType::ClaudeCode, "s1")],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6825,8 +7432,9 @@ mod tests {
 
     #[tokio::test]
     async fn whole_folder_import_still_never_resurrects_a_deleted_conversation() {
-        use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
-            Set};
+        use sea_orm::{
+            ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
+        };
         let db = fresh_in_memory_db().await;
         let folder_id = seed_folder(&db, "/tmp/proj-sweep").await;
         let items = vec![scan_summary(
@@ -6841,6 +7449,7 @@ mod tests {
             folder_id,
             &items,
             import_service::DeletedPolicy::Skip,
+            &HashSet::new(),
         )
         .await
         .unwrap();
@@ -6862,6 +7471,7 @@ mod tests {
             folder_id,
             &items,
             import_service::DeletedPolicy::Skip,
+            &HashSet::new(),
         )
         .await
         .unwrap();
@@ -6885,6 +7495,7 @@ mod tests {
             &EventEmitter::Noop,
             vec![(agent, child)],
             vec![key_of(AgentType::Hermes, "child")],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6920,6 +7531,7 @@ mod tests {
                 key_of(AgentType::ClaudeCode, "s1"),
                 key_of(AgentType::Codex, "s2"),
             ],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6985,8 +7597,8 @@ mod tests {
             &crate::chat_channel::manager::ChatChannelManager::new(),
             folder_id,
         )
-            .await
-            .expect_err("legacy import must be rejected while an import is in progress");
+        .await
+        .expect_err("legacy import must be rejected while an import is in progress");
         let msg = format!("{err:?}").to_lowercase();
         assert!(
             msg.contains("already in progress"),
@@ -7006,14 +7618,14 @@ mod tests {
             scan_summary("s2", AgentType::Codex, Some("/tmp/x"), at(1)),
         ];
 
-        let (tally, updated_ids, failed) =
-            import_service::import_summaries_resilient(
-                &db.conn,
-                999_999,
-                &items,
-                import_service::DeletedPolicy::Skip,
-            )
-            .await;
+        let (tally, updated_ids, failed) = import_service::import_summaries_resilient(
+            &db.conn,
+            999_999,
+            &items,
+            import_service::DeletedPolicy::Skip,
+            &HashSet::new(),
+        )
+        .await;
         assert_eq!(failed, 2, "both rows fail the folder FK and are counted");
         assert_eq!(tally.imported, 0);
         assert_eq!(tally.updated, 0);
@@ -7022,14 +7634,14 @@ mod tests {
         // Same items into a real folder import cleanly — the resilient loop did
         // not corrupt state or leave a half-open transaction.
         let folder_id = seed_folder(&db, "/tmp/x").await;
-        let (tally2, _ids, failed2) =
-            import_service::import_summaries_resilient(
-                &db.conn,
-                folder_id,
-                &items,
-                import_service::DeletedPolicy::Skip,
-            )
-            .await;
+        let (tally2, _ids, failed2) = import_service::import_summaries_resilient(
+            &db.conn,
+            folder_id,
+            &items,
+            import_service::DeletedPolicy::Skip,
+            &HashSet::new(),
+        )
+        .await;
         assert_eq!(failed2, 0);
         assert_eq!(tally2.imported, 2);
     }
@@ -7052,7 +7664,8 @@ mod tests {
                 &db.conn,
                 999_999,
                 &items,
-                import_service::DeletedPolicy::Skip
+                import_service::DeletedPolicy::Skip,
+                &HashSet::new()
             )
             .await
             .is_err(),
@@ -7136,7 +7749,11 @@ mod tests {
         assert_eq!(detail.assistant_turns_before_offset, Some(1));
         assert_eq!(detail.user_turns_before_offset, Some(1));
         assert_eq!(
-            detail.turns.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            detail
+                .turns
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["turn-2", "turn-3"]
         );
         // The windowed turns are the same objects the full response carries.
@@ -7221,7 +7838,10 @@ mod tests {
         assert_eq!((start, end), (0, 2));
         let own = crate::commands::turn_window::window_meta(&turns, start);
         let seam = crate::commands::turn_window::window_meta(&turns, 2);
-        assert_eq!(own.prefix_hash, crate::commands::turn_window::prefix_fingerprint(&[]));
+        assert_eq!(
+            own.prefix_hash,
+            crate::commands::turn_window::prefix_fingerprint(&[])
+        );
         assert_eq!(
             seam.prefix_hash,
             crate::commands::turn_window::prefix_fingerprint(&turns[..2])
