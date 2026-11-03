@@ -104,11 +104,12 @@ with it. The update from 0.37.0 does not, as 0.37.0 knows nothing of
 next to `codeg-server`. Replacing `codeg-cli` never stops one that is running,
 but a run it waits on in that server ends when the upgrade stops the server.
 
-**Docker.** Run it in the container: it finds the server there by itself. The
-workspace is a path in the container, e.g. under the `/projects` mount of
-`docker-compose.yml`:
+**Docker.** Run it in the container: it finds the server there by itself. Set
+`CODEG_PROJECTS_DIR` to the host projects directory when starting Compose; it
+is mounted at `/projects` inside the container:
 
 ```bash
+CODEG_PROJECTS_DIR="$HOME/codes" docker compose up -d
 docker compose exec codeg codeg-cli -w /projects/app -a claude_code -p "Review the latest commit"
 ```
 

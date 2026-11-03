@@ -13,12 +13,16 @@ services:
       - "3081-3090:3081-3090"
     volumes:
       - codeg-data:/data
-      # Mount your project directories (optional):
-      # - /path/to/projects:/projects
+      - codeg-npm-global:/root/.codeg/npm-global
+      # Set CODEG_PROJECTS_DIR to the host directory shown in the folder picker.
+      # The default keeps a local ./projects directory beside this file.
+      - ${CODEG_PROJECTS_DIR:-./projects}:/projects
     environment:
       - CODEG_TOKEN=${CODEG_TOKEN:-}
       - CODEG_PORT=3080
       - CODEG_HOST=0.0.0.0
+      - NPM_CONFIG_PREFIX=/root/.codeg/npm-global
+      - PATH=/root/.codeg/npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       # - CODEG_BRIDGE_PORTS=3081-3090   # or `off` to disable the port bridge
       # Name the dev servers by hostname instead of giving each one a port:
       # `3000.codeg.example.com` reaches the container's port 3000 over the
@@ -39,3 +43,4 @@ services:
 
 volumes:
   codeg-data:
+  codeg-npm-global:
