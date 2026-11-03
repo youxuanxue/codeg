@@ -332,12 +332,19 @@ The Docker image includes the built-in ACP adapters and CLI runtimes. For a
 Compose deployment, mount the npm prefix and your host projects directory:
 
 ```bash
-CODEG_PROJECTS_DIR="$HOME/codes" docker compose up -d --build
+CODEG_PROJECTS_DIR="$HOME/codes" \
+  CODEG_AGENT_HOME="$HOME" \
+  docker compose up -d --build
 ```
 
 The host directory appears as `/projects` in Codeg's folder picker. The
 `codeg-npm-global` volume keeps installed runtimes across container restarts
-and recreation.
+and recreation. The Compose file also mounts the native configuration stores
+for Claude, Codex, Gemini, Pi, and Kimi under `/root`; each CLI uses its own
+configuration without any cc-switch integration, and can update its own
+sessions or refreshed credentials. Set
+`CODEG_HTTP_PROXY` or `CODEG_HTTPS_PROXY` when the host configuration depends
+on a proxy reachable from the container.
 
 Either way, open `http://<host>:3080` in a browser and enter the access token the server prints when it starts (`docker logs` shows it for the container), or set `CODEG_TOKEN` to choose your own.
 

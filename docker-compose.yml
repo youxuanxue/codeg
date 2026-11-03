@@ -17,12 +17,25 @@ services:
       # Set CODEG_PROJECTS_DIR to the host directory shown in the folder picker.
       # The default keeps a local ./projects directory beside this file.
       - ${CODEG_PROJECTS_DIR:-./projects}:/projects
+      # Reuse the official CLI configuration stores from the host. This keeps
+      # Codeg independent of cc-switch: each CLI reads and updates its own
+      # native files.
+      # Set CODEG_AGENT_HOME when the host user home is not the default $HOME.
+      - ${CODEG_AGENT_HOME:-$HOME}/.claude:/root/.claude
+      - ${CODEG_AGENT_HOME:-$HOME}/.codex:/root/.codex
+      - ${CODEG_AGENT_HOME:-$HOME}/.gemini:/root/.gemini
+      - ${CODEG_AGENT_HOME:-$HOME}/.pi:/root/.pi
+      - ${CODEG_AGENT_HOME:-$HOME}/.kimi-code:/root/.kimi-code
     environment:
       - CODEG_TOKEN=${CODEG_TOKEN:-}
       - CODEG_PORT=3080
       - CODEG_HOST=0.0.0.0
       - NPM_CONFIG_PREFIX=/root/.codeg/npm-global
       - PATH=/root/.codeg/npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      # The host's CLI config may contain loopback proxy settings. They point
+      # at the container unless explicitly replaced for this deployment.
+      - HTTP_PROXY=${CODEG_HTTP_PROXY:-}
+      - HTTPS_PROXY=${CODEG_HTTPS_PROXY:-}
       # - CODEG_BRIDGE_PORTS=3081-3090   # or `off` to disable the port bridge
       # Name the dev servers by hostname instead of giving each one a port:
       # `3000.codeg.example.com` reaches the container's port 3000 over the

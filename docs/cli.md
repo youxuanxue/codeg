@@ -109,7 +109,9 @@ but a run it waits on in that server ends when the upgrade stops the server.
 is mounted at `/projects` inside the container:
 
 ```bash
-CODEG_PROJECTS_DIR="$HOME/codes" docker compose up -d
+CODEG_PROJECTS_DIR="$HOME/codes" \
+  CODEG_AGENT_HOME="$HOME" \
+  docker compose up -d
 docker compose exec codeg codeg-cli -w /projects/app -a claude_code -p "Review the latest commit"
 ```
 
