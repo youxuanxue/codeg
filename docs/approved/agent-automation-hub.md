@@ -21,7 +21,7 @@ risk_level: high
 | 任务执行 | codeg `work_task/`、ACP 连接 | 不处理 submodule |
 | worktree | `agent-skills/git-worktree-submodule/scripts/wtree.py`（`create --json`、`remove`、`session-check`） | 无 |
 | headless 约束 | dev-rules `global/CLAUDE.md` §4，`check_workflow_yaml.py` | 无 |
-| 门禁 | dev-rules `templates/preflight.sh`、xj-review、`gh-pr-guard.py` | 本方案 P1 再接 CI；`gh-pr-guard` 目前没有注册，见 D5 |
+| 门禁 | dev-rules `templates/preflight.sh`、xj-review、`gh-pr-guard.py` | 本方案 P1 再接 CI；`gh-pr-guard` 已于 2026-11-03 注册到 `~/.claude/settings.json`，见 D5 |
 | 飞书 | codeg `chat_channel/backends/lark.rs`（长连接收消息、发卡片） | 卡片按钮回调未实现（`callback_data: None`，`send_interactive_message` 走默认降级） |
 | 出口 IP | infra-skills `cc0`/`codex0`/`agy0` | 无 |
 | 跨项目分发 | `dev-rules-fanout` | 写死 `/Users/xuejiao` 路径，需人工启动 |
@@ -32,7 +32,7 @@ risk_level: high
 - **D2 公网事件**：GitHub/GitLab 改用 Forge 定时扫描（间隔 1 到 2 分钟，`MIN_SCAN_INTERVAL_MINUTES = 1`），不接公网 webhook。飞书走现有长连接，P0 只出站（通知），不处理入站指令；入站指令是 P2。
 - **D3 事件协议**：与 AIHOT 完全兼容（见「事件协议」）。来源按 API key 区分，不信任消息体自报。扩展字段只放可选的 `meta`。
 - **D4 worktree 单一 owner**：带 submodule 的仓库由 codeg 调 `wtree.py create --json` / `remove`，codeg 不再自己实现 submodule 处理。不带 submodule 的仓库保持现状。zhifu 自身挂着 `dev-rules` submodule，所以第一个场景就会走 wtree.py 这条路径。
-- **D5 合并**：P0 不自动合并。P1 先全部推卡片跑两周，再按白名单放开（见「合并策略」）。Agent 不执行合并，但这条约束**目前没有机制支撑**：2026-11-03 核对，`~/.claude/settings.json` 没有 `hooks` 键，`permissions` 的 allow/deny 为空，`defaultMode` 是 `bypassPermissions`，`gh-pr-guard.py` 躺在 `~/.claude/hooks/` 里但没有注册；dev-rules 和 codeg 的 main 没有分支保护，zhifu 因私有仓库且无 GitHub Pro，保护接口返回 403。因此任何 `mode: auto` 规则启用之前，必须先注册该 hook 并实测拦截（前置项 9）。hook 只对 Claude Code 有效，所以 P0 的规则只允许 `to.agent = claude`。
+- **D5 合并**：P0 不自动合并。P1 先全部推卡片跑两周，再按白名单放开（见「合并策略」）。Agent 不执行合并，靠 `gh-pr-guard` 兜底：2026-11-03 已在 `~/.claude/settings.json` 注册 PreToolUse 和 PostToolUse 两条 hook（改动前的文件备份为 `settings.json.bak-20261103`），自测通过，模拟输入拦下三种 `gh pr merge` 写法，当前会话里连 `gh pr merge --help` 也被拦。注册之前这条约束没有任何机制支撑：`permissions` 的 allow/deny 为空，`defaultMode` 是 `bypassPermissions`，dev-rules 和 codeg 的 main 没有分支保护，zhifu 因私有仓库且无 GitHub Pro，保护接口返回 403。**该 hook 不检查授权**：命令里出现 `gh pr merge` 就一律拦截，所以合并要由人在 GitHub 网页或自己的终端执行。hook 只对 Claude Code 有效，所以 P0 的规则只允许 `to.agent = claude`。codeg 经 ACP 启动的 Claude 会话是否加载用户级 hook 还没实测，没测之前不得启用任何 `mode: auto` 规则（前置项 9）。
 - **D6 Tailscale 与 ClashX 共存**（`100.64.0.0/10`、MagicDNS `100.100.100.100`、`*.ts.net` 直连，不进 fake-ip）由 infra-skills 负责。已完成：`youxuanxue/infra-skills` PR #33 已于 2026-11-02 合并。
 - **D7 Thread 订阅直通**：事件的 `subject` 作为 Thread 键。任务启动后订阅对应 Thread，同一 Thread 的后续事件由程序直接送给原任务，不再走规则匹配（见「Thread 订阅」）。P0 的首个场景是「一个事件对应一个独立任务」，没有后续事件，所以订阅直通放到 P1 实现。
 - **D8 规则级 `mode`**：每条规则有 `off`、`observe`、`auto` 三档。新规则先 `observe`，只记录「本来会做什么」，不执行；看过记录再切 `auto`。
@@ -89,7 +89,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 }
 ```
 
-- 校验：`id`、`type`、`subject` 只允许 `[A-Za-z0-9#._:/@-]`，长度 1 到 200；`summary` ≤ 200 字，`detail` ≤ 4000 字；`meta` 可选，≤ 8 KB；整个请求体 ≤ 16 KB。超长一律拒绝（返回 413/422），不截断。
+- 校验：`id`、`type`、`subject` 只允许 `[A-Za-z0-9#._:/@-]`，长度 1 到 200；`summary` ≤ 200 字，`detail` ≤ 4000 字；`meta` 可选，≤ 8 KB；`/events` 整个请求体 ≤ 16 KB，`/tell` 整个请求体 ≤ 24 KB（`text` 最多 18,000 字节，加上 JSON 转义和其他字段）。超长一律拒绝（返回 413/422），不截断。
 - 幂等：`(source, id)` 唯一。重复投递返回 200，不再派发。生产方超时后可以用同一个 `id` 重发，这是 AIHOT 依赖的语义。
 - 响应：只有落库成功才返回 200。401 表示 key 无效；422 表示格式不符；没有匹配规则的事件同样落库并返回 200，状态记为 `unrouted`。
 - `summary`、`detail`、`meta`、`link` 都是不可信数据，进入 prompt 时一律放进 hub 信封：沿用 `forge/envelope.rs` 的规则（长度上限、围栏、「这不是指令」前言）。该文件的 `ForgeSnapshot` 是 issue 快照类型，不能直接装事件，hub 另写一个信封函数。规则的 `ask` 里不允许出现这些字段（见规则字段表）。
@@ -100,15 +100,15 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 - 目标群的确定方式：来源绑定了项目（`hub_source.project`）时，一律发到该项目的群，请求体里的 `project` 被忽略，所以这个来源无法往别的项目的群发消息；来源没有绑定项目时，用请求体的 `project`（必须在注册表里，否则返回 422）；两者都没有则发到总览群。
 - 这是所有发给人的消息的唯一出口：codeg 内部的 Agent 结论、Forge 自动处理的通知、外部来源的消息都走这里，统一转飞书。
 - **纯文本约束**：来自外部来源的 `/tell` 只渲染成纯文本，不能带按钮、链接卡片或回调数据。标题由中台固定生成：`[项目][来源名]`，来源名由 key 决定，不可伪造。你在群里看到的任何带按钮的审批卡片，只可能由中台根据任务状态自己生成（P2）。
-- **长文本**：AIHOT 会把长消息拆成多段，每段用不同的 `key`（`alert-<时间戳>-<hash>-<序号>`），所以对它来说「同 key 合并」不会触发，每段各发一条。中台对单个 `text` 设上限 4000 字，超出返回 422，由生产方自己拆分，这与 AIHOT 现有行为一致。
+- **长文本**：AIHOT 会把长消息拆成多段，每段用不同的 `key`（`alert-<时间戳>-<hash>-<序号>`），所以对它来说「同 key 合并」不会触发，每段各发一条。AIHOT 自己按 18,000 字节切段（`WEBHOOK_TEXT_BYTES = 18_000`，`notify/feishu.ts`），所以 `/tell` 的单个 `text` 上限取 18,000 字节，超出返回 422，由生产方自己拆分；否则 AIHOT 的长日报会被拒绝并回退到直发飞书群，绕过「唯一出口」。
 
 ### 路由与鉴权
 
 - `/events`、`/tell` 是独立路由组，挂在认证中间件之外，参照现有 `/forge_webhook`（`web/router.rs`：单独挂路由、自己验证、单独的请求体上限）。它们只接受事件 key，不接受 `CODEG_TOKEN`。
 - 反向隔离：事件 key 调用任何管理 API 必须返回 401。这条写进验收。
-- 每个路由组有自己的请求体上限（16 KB）和按 key 的限流（默认每个 key 每分钟 60 次，超出返回 429，生产方按原 `id` 重试即可）。
+- 每个路由组有自己的请求体上限（`/events` 16 KB，`/tell` 24 KB）和按 key 的限流（默认每个 key 每分钟 60 次，超出返回 429，生产方按原 `id` 重试即可）。
 - key 只存哈希值；日志和任务记录里不出现 key 原文。
-- **key 管理（P0 范围）**：管理 API（受 `CODEG_TOKEN` 保护）加一组 CLI 子命令：`codeg hub source create <name>`（key 只在创建时显示一次）、`list`、`rotate`、`revoke`。来源名不得以 `forge:` 开头（保留给 Forge 自己）。另有 `codeg hub check <配置目录>`，校验 `rules.json` 和 `projects.json`，既给热加载用，也给配置仓库的 CI 用。
+- **key 管理（P0 范围）**：新增管理接口（受 `CODEG_TOKEN` 保护）：创建来源（key 只在创建时显示一次）、列出、轮换、吊销。命令行入口放在 `codeg-cli` 的 `hub` 子命令下（`codeg-cli hub source create|list|rotate|revoke`），它连接已运行的 Codeg，所以依赖上述管理接口。来源名不得以 `forge:` 开头（保留给 Forge 自己）。另有 `codeg-cli hub check <配置目录>`，**离线**校验 `rules.json` 和 `projects.json`，不需要运行实例，既给热加载用，也给配置仓库的 CI 用。
 
 ### 监听
 
@@ -117,6 +117,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
   - 用 `codeg-server`：设 `CODEG_HOST=<tailnet 地址>`，不需要改代码。
   - 用桌面版：在 `WebServiceConfig` 增加 `host` 字段（默认保持 `0.0.0.0` 以不影响现有用户），属于 P0 的改动。
   - 两种形态由实现前的一次评估决定，评估项：是否需要桌面 UI 与中台同进程，以及 `work_task` 引擎的单进程选举（数据目录文件锁）会选中哪个进程。
+- **启动顺序**：`codeg-server` 绑定失败时只记录错误并以退出码 1 结束，不重试（`bin/codeg_server.rs`）。如果开机时 Tailscale 还没分配地址，中台会起不来。所以 LaunchAgent 的启动命令要先等 tailnet 地址可用（轮询 `tailscale ip -4`，上限 60 秒）再启动，失败时靠 LaunchAgent 的 `KeepAlive` 重启；桌面版的行为没有核实。
 - Tailscale ACL 只放行用户自己的设备和登记过的服务器。
 - 现有 `CODEG_TOKEN` 继续保护管理 API，与事件 key 互不通用。
 
@@ -197,7 +198,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 
 校验失败的情形：`when.source` 以 `forge:` 开头（Forge 的 issue 和 PR 只由 Forge 自己处理，D11，避免同一件事被两套规则各建一个任务）；`to.agent` 不是 `claude`（P0）；`project` 不在注册表里；`skill` 在 agent-skills 里不存在；`ask` 引用了 `id`、`type`、`subject` 之外的字段；`name` 重名；`risk` 不在 `low`、`regular`、`high` 里。
 
-一个事件先看有没有存活的订阅（见「Thread 订阅」），没有再按顺序匹配规则，只命中第一条 `enabled` 且 `mode` 不是 `off` 的规则。`mode: observe` 命中的事件状态记为 `observed`，并在记录里写明本来会用的 Agent、cwd 和 `ask`；这类事件不通知人，只在管理界面和每日汇总里出现。命中 `risk: high` 的任务，在执行前也要先推卡片等人确认。P0 没有按钮回调，这类任务只通知、不执行。
+P0 没有订阅：事件直接按顺序匹配规则，同一 `subject` 的并发事件走「合并成结束后再跑一次」。P1 引入订阅后，先看有没有存活的订阅（见「Thread 订阅」），已订阅的 subject 改为直通，取代合并；没有订阅的再按顺序匹配规则。匹配时只命中第一条 `enabled` 且 `mode` 不是 `off` 的规则。`mode: observe` 命中的事件状态记为 `observed`，并在记录里写明本来会用的 Agent、cwd 和 `ask`；这类事件不通知人，只在管理界面和每日汇总里出现。命中 `risk: high` 的任务，在执行前也要先推卡片等人确认。P0 没有按钮回调，这类任务只通知、不执行。
 
 ## 执行
 
@@ -215,7 +216,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
   5. 一个规则一个项目，任务只写自己的 worktree。
 
   **没有金额预算，也没有工具白名单**。这与 dev-rules §4 对 `claude -p` 的要求不同（那条约束的是无头调用，不是 ACP）。要强约束，需要无头运行器或脚本执行，见「待定问题」第 1 条。
-- **汇报**：不新建 `hub_report`。codeg 已有 `task_progress` 和 `task_complete`，结论为 `success`、`needs_review`、`blocked`（`acp/delegation/companion.rs:1414` 校验），引擎据此结算：`blocked` 变为失败，`success` 和 `needs_review` 进入 review。P0 只新增一个结论 `dropped`，表示查过后没有要做的事，任务静默结束，不通知人。对应关系：
+- **汇报**：不新建 `hub_report`。codeg 已有 `task_progress` 和 `task_complete`，结论为 `success`、`needs_review`、`blocked`（`acp/delegation/companion.rs:1414` 校验），引擎据此结算：`blocked` 变为失败，`success` 和 `needs_review` 进入 review。P0 只新增一个结论 `dropped`，表示查过后没有要做的事，任务静默结束，不通知人。落点与改动（三处）：① `acp/delegation/companion.rs:1414` 的校验和错误文案增加 `dropped`；② `work_task` 迁移和实体里列出结论值的注释同步；③ 引擎结算（`engine.rs` 约 3165 行）把 `dropped` 当作 review 处理，并在 `tell` 策略里跳过通知，然后由中台调用现有的 `complete_without_merge`（`work_task_service.rs`，review → done，引擎会拿 git 重新核对「没有改动」）自动完结并清理 worktree。若 Agent 报了 `dropped` 但 worktree 里有改动，不自动完结，按普通 review 通知，避免静默丢弃工作。对应关系：
 
   | 要表达的 | 现有机制 |
   | --- | --- |
@@ -225,7 +226,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
   | 失败 | 引擎结算为 failed |
   | 没有要做的事 | **新增** `dropped` |
 
-  `tell: needed` 时，只有进入 review、`blocked`、失败三种情形才通知。`question` 和 `options`（相当于文章里的「票拟」）放进 `task_complete` 的 summary，P0 不做结构化字段，P2 做卡片时再结构化。「等后续事件」的 `waiting` 状态属于订阅直通，随 P1 引入。
+  `tell: needed` 时，只有进入 review、`blocked`、失败、`awaiting_input` 四种情形才通知。`awaiting_input` 是无人值守时 Agent 停在提问或权限请求上的状态，必须立刻通知（并带上问题内容），`timeout_minutes` 只是最后的兜底，不是主要手段。`question` 和 `options`（相当于文章里的「票拟」）放进 `task_complete` 的 summary，P0 不做结构化字段，P2 做卡片时再结构化。「等后续事件」的 `waiting` 状态属于订阅直通，随 P1 引入。
 
 ## 合并策略（P1 起生效）
 
@@ -234,12 +235,12 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 - 首批白名单：dev-rules 分发产生的 PR（只改 submodule 指针、`.cursor/rules/`、`AGENTS.md` 托管块）、纯文档改动、纯测试改动。
 - **按仓库启用**：自动合并依赖 GitHub 分支保护的必需检查。2026-11-03 查询：dev-rules、codeg 的 main 没有保护；zhifu 的保护接口返回 403（私有仓库需要 GitHub Pro 或改为公开），auto-merge 能否使用没有验证。这三个仓库在配置好保护之前都不进自动合并名单，保持人工合并。
 - 永远推卡片：上游合并、数据库迁移、鉴权与权限、密钥、发布配置、依赖大版本升级。
-- 白名单本身作为长期授权写进决策台账（附原话和日期）。xj-review 规则补一句「台账内的类别视为已授权」。这句规则的修改属于 dev-rules 的变更，另提 PR。
+- 白名单本身作为长期授权写进决策台账（附原话和日期），由 CI 的 auto-merge 执行。Agent 的 `gh pr merge` 始终被 `gh-pr-guard` 拦下，所以白名单授权的是 CI，不是 Agent，xj-review 的「无授权不合并」规则不需要修改。
 
 ## 数据模型（SeaORM 迁移，只新增表）
 
 - `hub_source`：`id`、`name`、`key_hash`、`project`（可空，绑定后该来源只能向此项目的群发消息）、`enabled`、`created_at`、`revoked_at`。
-- `hub_event`：`id`、`source_id`、`event_id`、`type`、`subject`、`summary`、`detail`、`link`、`meta`、`received_at`、`status`（`unrouted`、`observed`、`queued`、`running`、`delivered`、`delivery_failed`、`done`、`needs_decision`、`failed`、`coalesced`）、`rule_name`、`work_task_id`。唯一约束 `(source_id, event_id)`。
+- `hub_event`：`id`、`source_id`、`event_id`、`type`、`subject`、`summary`、`detail`、`link`、`meta`、`received_at`、`status`（P0：`unrouted`、`observed`、`queued`、`running`、`done`、`needs_decision`、`failed`、`coalesced`；P1 增加 `delivered`、`delivery_failed`）、`rule_name`、`work_task_id`。唯一约束 `(source_id, event_id)`。
 - `hub_subscription`：`work_task_id`、`source_id`、`subject`、`context_only`（只提供上下文，不带授权，也不唤醒已结束的任务）、`created_at`、`dropped_at`。唯一约束 `(work_task_id, source_id, subject)`。
 - `hub_tell`：`source_id`、`project`（可空，空表示总览群）、`key`、`text`、`last_sent_at`、`message_id`。唯一约束 `(source_id, project, key)`。
 
@@ -259,11 +260,11 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 6. 新建私有仓库 `youxuanxue/agent-hub-config`，放 `rules.json` 和 `projects.json`；总览群 id 写在这里。
 7. `dev-rules-fanout` skill 增加单项目模式（只处理 `ask` 指定的当前项目），否则第一个场景的 skill 会按 `.registered-projects` 扫全部项目。
 8. 接入 zhifu：本机已克隆到 `~/Codes/zhifu`（仓库已有 `dev-rules` submodule 和 `.cursor/rules/`）；还需要拉取 submodule，并在 dev-rules 的 `.registered-projects` 登记（`sync.sh --local`，会改动两个仓库，各自走 PR）。zhifu 的专属飞书群建好后补 `feishu_chat`。sub2api 已在注册表里；ai4s 暂不接入，仓库和群准备好再加。
-9. 注册 `gh-pr-guard`：在 `~/.claude/settings.json` 增加 PreToolUse hook，指向 `~/.claude/hooks/gh-pr-guard.py`，并实测 `gh pr merge` 被拦截（含 codeg 经 ACP 启动的 Claude 会话是否也加载用户级 settings，这一点没有核实）。同时按全局纪律登记 `preflight-debt`。这是启用任何 `mode: auto` 规则的前提。
+9. `gh-pr-guard`：已注册（2026-11-03），当前会话实测生效。**待办**：在 codeg 的一个 ACP 任务会话里执行 `gh pr merge --help`，确认同样被拦；不被拦则这条保护对 hub 任务不成立，要换机制（例如项目级 `.claude/settings.json`，或 ACP 启动参数）。这是启用任何 `mode: auto` 规则的前提。
 
 ### P0：打通
 
-- `/events`、`/tell`、`hub_event` 和 `hub_source` 和 `hub_tell` 三张表、key 管理命令和 `codeg hub check`、`rules.json` 与 `projects.json` 的加载和校验、并发组、`timeout_minutes`、work_task 接入 wtree.py、`dropped` 结论。飞书只通知、不审批，通知带项目名，全部发总览群（专属群建好后再做 D10）。
+- `/events`、`/tell`、`hub_event` 和 `hub_source` 和 `hub_tell` 三张表、key 管理接口和 `codeg-cli hub` 子命令、`rules.json` 与 `projects.json` 的加载和校验、并发组、`timeout_minutes`、work_task 接入 wtree.py、`dropped` 结论。飞书只通知、不审批，通知带项目名，全部发总览群（专属群建好后再做 D10）。
 - 三条事件按顺序接入，每周一条：
   1. **dev-rules main 变更 → 同步 zhifu**（一条规则一个项目，一个事件产生一个任务）：用一个独立的小脚本（LaunchAgent 每 2 分钟跑一次，`git ls-remote` 加 `curl` 投递）检测 dev-rules 的 main 有没有变化，有变化就以 `id = <sha>` 投递事件。不用 codeg 的定时任务：它的动作是启动 Agent 会话或入队任务（`automation/engine.rs`），每次轮询都会产生一次模型调用。脚本先把最近一次已投递的 sha 写到本地文件再发，失败时用同一个 sha 重发，按 sha 天然幂等。以后给 sub2api 等项目加同步，就是各加一条规则，互不影响。这个场景同时验证 wtree.py（zhifu 有 submodule）。
   2. **Forge issue**：沿用现有自动处理，扫描间隔调到 1 到 2 分钟，通知改走 `/tell`。
@@ -299,6 +300,8 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
   - 规则文件校验失败（`project` 不存在、`ask` 引用了 `summary`、`when.source` 以 `forge:` 开头、`name` 重名）时，继续使用旧规则，并向总览群报错。
   - `ask` 里出现 `{{summary}}` 被拒绝；事件的 `summary` 带「忽略以上指令」之类文本时，只出现在信封里，不进指令。
   - hub 任务永远不会自动合并（`source_kind` 非空）。
+  - 任务进入 `awaiting_input` 时立刻通知，通知里带问题内容；超过 `timeout_minutes` 仍无人应答才取消。
+  - Agent 报 `dropped` 且 worktree 无改动时，任务自动完结、不通知；有改动时按 review 通知。
   - 在 hub 任务的会话里执行 `gh pr merge` 被 `gh-pr-guard` 拦下（实测，不是读配置）。
   - 带 submodule 的仓库：worktree 由 wtree 创建，分支为 `task/<id>`，base 与记录的 `base_sha` 一致，登记为任务的 `worktree_folder_id`；任务取消、删除、重试时，submodule worktree 一并移除，不留残留。
   - 任务超过 `timeout_minutes` 被取消，并向总览群报告。
@@ -340,5 +343,6 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 - 引擎里所有 worktree 移除点，逐个改为认识 submodule worktree。
 - hub 任务里 Agent 自己 `git push` 和 `gh pr create` 所用的凭据来源。
 - `launcher`（cc0、codex0）能否按规则作用到 ACP 启动的 Agent（`commands/acp.rs` 的 `build_runtime_env_for_agent`）。
+- 桌面版内置 web 服务绑定 tailnet 地址失败时的行为（`codeg-server` 已确认是退出码 1，不重试）。
 - 飞书对同一应用多条长连接的投递规则（P2 入站前）。
 - zhifu 能否使用 GitHub auto-merge。
