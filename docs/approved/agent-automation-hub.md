@@ -191,7 +191,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 | `acp` | 否 | 与 `WorkTaskConfig` 的 `mode_id`、`config_values` 同形，用来选权限模式、模型、推理深度等；省略则继承该文件夹的设置。模型和推理深度对应哪些 `config_values` 键因 Agent 而异，实现前以 ACP 返回的选项为准 |
 | `project` / `cwd` / `worktree` | `project` 与 `cwd` 二选一 | `project` 引用项目注册表（推荐），同时决定通知发到哪个群；`cwd` 直接写路径，通知发到总览群。`worktree` 取 `wtree`（默认，由 wtree.py 新建）或 `none`（只读任务，直接在目录里执行） |
 | `skill` / `ask` | 是 | 要用的 skill 和一句指令。`ask` 只能引用 `{{id}}`、`{{type}}`、`{{subject}}`，这三个字段的字符集受限（`[A-Za-z0-9#._:/@-]`），不能带注入文本。`summary`、`detail`、`link`、`meta` 一律不进指令，放进 hub 信封单独附上 |
-| `group` / `parallel` | 否 | 并发组（默认等于 `name`）和组内上限（默认 `1`）。同一个 `subject` 同时只跑一轮；运行中又来同 subject 的事件时，合并成「结束后再跑一次」，语义与 `forge/auto` 一致 |
+| `group` / `parallel` | 否 | 并发组（默认等于 `name`）和组内上限（默认 `1`）。同一个 `subject` 同时只跑一轮；运行中又来同 subject 的事件时，合并成「结束后再跑一次」，思路与 `forge/auto` 的 `rerun` 一致，但事件带载荷，所以补充规定：补跑只用**最新一个**事件的载荷；被合并的事件状态记 `coalesced`，并记录最终处理它的事件 id（`coalesced_into`），不再单独执行。补跑的任务完结后，这些 `coalesced` 事件的显示状态随它。dev-rules 同步场景用 sha 同时当 `id` 和 `subject`，补跑取最新 sha 即可 |
 | `risk` | 是 | `low`、`regular`、`high`，取值与 `product-dev.mdc` 一致，决定 tell 策略和以后的合并策略 |
 | `timeout_minutes` | 否，默认 `30` | 单个任务的最长运行时间，到点由中台取消并通过 `/tell` 报告（取消入口实现前核实）。这是 P0 唯一由中台自己执行的限制，见「执行」 |
 | `tell` | 否，默认 `needed` | `never`；`needed`（只在 Agent 报告需要决策、受阻或失败时通知）；`always` |
@@ -240,7 +240,9 @@ P0 没有订阅：事件直接按顺序匹配规则，同一 `subject` 的并发
 ## 数据模型（SeaORM 迁移，只新增表）
 
 - `hub_source`：`id`、`name`、`key_hash`、`project`（可空，绑定后该来源只能向此项目的群发消息）、`enabled`、`created_at`、`revoked_at`。
-- `hub_event`：`id`、`source_id`、`event_id`、`type`、`subject`、`summary`、`detail`、`link`、`meta`、`received_at`、`status`（P0：`unrouted`、`observed`、`queued`、`running`、`done`、`needs_decision`、`failed`、`coalesced`；P1 增加 `delivered`、`delivery_failed`）、`rule_name`、`work_task_id`。唯一约束 `(source_id, event_id)`。
+- `hub_event`：`id`、`source_id`、`event_id`、`type`、`subject`、`summary`、`detail`、`link`、`meta`、`received_at`、`disposition`（只存路由时刻就确定的结果：P0 为 `unrouted`、`observed`、`routed`、`coalesced`；P1 增加 `delivered`、`delivery_failed`）、`coalesced_into`（可空）、`rule_name`、`work_task_id`。唯一约束 `(source_id, event_id)`。
+  - **事件的处理进度不单独存**：`routed` 事件的显示状态由其 `work_task` 的状态派生，管理界面和每日汇总都读这个派生值，避免两处手动同步。映射：`todo` / `queued` / `preparing` 显示为 queued；`running` 显示为 running；`awaiting_input` 显示为 needs_decision；`review` 显示为 needs_review（等人审，按 `tell` 规则通知）；`done` 显示为 done（含 `dropped` 自动完结）；`failed` 显示为 failed；`canceled` 显示为 canceled（人取消或超时取消，原因取自任务时间线）；`merging` 不会出现，hub 任务不走引擎合并。
+  - 并发合并和 Watchdog 的判断都读派生状态：「同一 subject 是否还在跑」等价于「是否存在非终态（`todo`、`queued`、`preparing`、`running`、`awaiting_input`、`review`）的关联任务」。
 - `hub_subscription`：`work_task_id`、`source_id`、`subject`、`context_only`（只提供上下文，不带授权，也不唤醒已结束的任务）、`created_at`、`dropped_at`。唯一约束 `(work_task_id, source_id, subject)`。
 - `hub_tell`：`source_id`、`project`（可空，空表示总览群）、`key`、`text`、`last_sent_at`、`message_id`。唯一约束 `(source_id, project, key)`。
 
@@ -260,7 +262,7 @@ P0 没有订阅：事件直接按顺序匹配规则，同一 `subject` 的并发
 6. 新建私有仓库 `youxuanxue/agent-hub-config`，放 `rules.json` 和 `projects.json`；总览群 id 写在这里。
 7. `dev-rules-fanout` skill 增加单项目模式（只处理 `ask` 指定的当前项目），否则第一个场景的 skill 会按 `.registered-projects` 扫全部项目。
 8. 接入 zhifu：本机已克隆到 `~/Codes/zhifu`（仓库已有 `dev-rules` submodule 和 `.cursor/rules/`）；还需要拉取 submodule，并在 dev-rules 的 `.registered-projects` 登记（`sync.sh --local`，会改动两个仓库，各自走 PR）。zhifu 的专属飞书群建好后补 `feishu_chat`。sub2api 已在注册表里；ai4s 暂不接入，仓库和群准备好再加。
-9. `gh-pr-guard`：已注册（2026-11-03），当前会话实测生效。**待办**：在 codeg 的一个 ACP 任务会话里执行 `gh pr merge --help`，确认同样被拦；不被拦则这条保护对 hub 任务不成立，要换机制（例如项目级 `.claude/settings.json`，或 ACP 启动参数）。这是启用任何 `mode: auto` 规则的前提。
+9. `gh-pr-guard`：已注册（2026-11-03），当前会话实测生效。**待办（实测步骤）**：① 在 codeg 里对一个无关的测试仓库手动新建一个 work task，Agent 选 Claude，prompt 为「只执行 `gh pr merge --help`，原样汇报命令输出，不做其他事」；② 通过判据：输出里出现 `禁止无授权 merge`（hook 的拦截文案），任务不报告 `gh pr merge` 的帮助文本；③ 失败（出现了帮助文本）说明 ACP 会话没有加载用户级 hook，保护对 hub 任务不成立，要换机制（项目级 `.claude/settings.json`，或 ACP 启动参数），并重测；④ 结果（日期、codeg 版本、结论）写回本文档这一条。这是启用任何 `mode: auto` 规则的前提。
 
 ### P0：打通
 
@@ -301,6 +303,8 @@ P0 没有订阅：事件直接按顺序匹配规则，同一 `subject` 的并发
   - `ask` 里出现 `{{summary}}` 被拒绝；事件的 `summary` 带「忽略以上指令」之类文本时，只出现在信封里，不进指令。
   - hub 任务永远不会自动合并（`source_kind` 非空）。
   - 任务进入 `awaiting_input` 时立刻通知，通知里带问题内容；超过 `timeout_minutes` 仍无人应答才取消。
+  - 事件的显示状态由任务派生：任务进入 `review` 时事件显示 needs_review，人取消后显示 canceled，不需要单独回写。
+  - 并发合并：同一 `subject` 运行中连续来 3 个事件，结束后只补跑一次，且用的是第 3 个事件的载荷；前两个事件的 `coalesced_into` 指向第 3 个。
   - Agent 报 `dropped` 且 worktree 无改动时，任务自动完结、不通知；有改动时按 review 通知。
   - 在 hub 任务的会话里执行 `gh pr merge` 被 `gh-pr-guard` 拦下（实测，不是读配置）。
   - 带 submodule 的仓库：worktree 由 wtree 创建，分支为 `task/<id>`，base 与记录的 `base_sha` 一致，登记为任务的 `worktree_folder_id`；任务取消、删除、重试时，submodule worktree 一并移除，不留残留。
