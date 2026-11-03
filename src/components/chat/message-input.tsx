@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
 import { isImeCompositionKey } from "@/lib/ime-composition"
 import { Button } from "@/components/ui/button"
@@ -87,6 +87,7 @@ import {
   clearMessageInputDraftV2,
   loadMessageInputDraftV2,
   saveMessageInputDraftV2,
+  setLiveComposerContent,
 } from "@/lib/message-input-draft"
 import { rankByTextMatch } from "@/lib/fuzzy-text-match"
 import {
@@ -116,6 +117,7 @@ import {
   buildKnownInvocations,
   commandToReference,
   diskSkillTrigger,
+  skillMarkedCommands,
   skillsForMenu,
   skillToReference,
 } from "@/components/chat/composer/invocation-reference"
@@ -458,6 +460,21 @@ export function MessageInput({
     setComposerEmpty(ed ? isComposerEmpty(ed) : true)
   }, [])
 
+  // What this composer holds that its saved draft may not show yet — typing
+  // inside the save debounce, image attachments (never saved), a file still
+  // being read or uploaded — reported per draft key for the tab store, which
+  // reads it before tidying a "blank" draft tab away. An intake is reported
+  // the moment it starts; the rest once React has committed it (below).
+  const composerId = useId()
+  const reportIntakeStart = useCallback(() => {
+    if (!effectiveDraftStorageKey) return
+    setLiveComposerContent(
+      effectiveDraftStorageKey,
+      `${composerId}:intake`,
+      true
+    )
+  }, [composerId, effectiveDraftStorageKey])
+
   // Attachments (images → thumbnail strip, files → inline badges) and the "+"
   // menu's insertable shortcuts. Both are shared with the to-do task composers,
   // so paste/drop/pick and the skill/quick-message entries behave identically
@@ -470,6 +487,7 @@ export function MessageInput({
     attachmentTabId,
     defaultPath,
     logLabel: "MessageInput",
+    onIntakeStart: reportIntakeStart,
   })
   const {
     attachments,
@@ -929,6 +947,32 @@ export function MessageInput({
   const imageAttachments = attach.imageAttachments
   const hasAttachments = attachments.length > 0
   const hasSendableContent = !composerEmpty || hasAttachments
+  // The committed half of the report above: what the composer holds, and
+  // whether an intake is still in flight (once it settles, what it brought is
+  // already in `hasSendableContent` here). `intakeRevision` re-runs this after
+  // every intake, even one that started and settled within one render batch,
+  // where `intakePending` reads false both times.
+  const { intakePending, intakeRevision } = attach
+  useEffect(() => {
+    if (!effectiveDraftStorageKey) return
+    const intakeId = `${composerId}:intake`
+    setLiveComposerContent(
+      effectiveDraftStorageKey,
+      composerId,
+      hasSendableContent
+    )
+    setLiveComposerContent(effectiveDraftStorageKey, intakeId, intakePending)
+    return () => {
+      setLiveComposerContent(effectiveDraftStorageKey, composerId, false)
+      setLiveComposerContent(effectiveDraftStorageKey, intakeId, false)
+    }
+  }, [
+    composerId,
+    effectiveDraftStorageKey,
+    hasSendableContent,
+    intakePending,
+    intakeRevision,
+  ])
 
   // ── Slash command autocomplete ──
   //
@@ -950,6 +994,12 @@ export function MessageInput({
   const slashCommands = useMemo(
     () => availableCommands ?? [],
     [availableCommands]
+  )
+  // Read off the full list, not the filtered one, so typing never moves the
+  // rows' icon column in or out.
+  const skillCommandNames = useMemo(
+    () => skillMarkedCommands(slashCommands),
+    [slashCommands]
   )
   const filteredSlashCommands = useMemo(() => {
     if (!slashMenuOpen || slashCommands.length === 0) return []
@@ -1269,24 +1319,30 @@ export function MessageInput({
   // reproduces the shortcut everywhere in the box. Reading the clipboard happens
   // inside the menu-click / keydown user gesture, so the async Clipboard API has
   // the activation it needs.
-  const handleContextPaste = useCallback(async () => {
+  const pasteFromClipboard = useCallback(async () => {
     if (disabled) return
     const editor = editorRef.current?.getEditor()
     if (!editor) return
-    let text = ""
     // The async clipboard read can be blocked at call time even though the API
     // exists (denied permission, browser policy), so track that: with the native
     // menu (and its Paste) suppressed to show this one, a silent failure would
     // leave the user with no feedback and no fallback.
     let readBlocked = false
-    try {
-      text = (await navigator.clipboard.readText()) ?? ""
-    } catch {
-      // Permission denied / unsupported / no activation — fall through to the
-      // image path (a textless clipboard may still hold a screenshot).
-      readBlocked = true
-      text = ""
-    }
+    // Started before anything is awaited, so it still runs inside the gesture.
+    const textRead = (async () => {
+      try {
+        return (await navigator.clipboard.readText()) ?? ""
+      } catch {
+        // Permission denied / unsupported / no activation — fall through to the
+        // image path (a textless clipboard may still hold a screenshot).
+        readBlocked = true
+        return ""
+      }
+    })()
+    // Files copied in Finder / Explorer reach the text API only as their
+    // names: attach the files themselves instead, as a keyboard paste does.
+    if (await attach.appendClipboardFiles()) return
+    const text = await textRead
     if (text) {
       // Route through ProseMirror's own text paste so newlines, marks and the
       // editor's paste pipeline behave exactly like a keyboard paste.
@@ -1312,6 +1368,17 @@ export function MessageInput({
       toast.error(t("pasteUnavailable"))
     }
   }, [disabled, attach, t])
+  // Content is on its way from the first clipboard read on: counted as an
+  // intake, so draft tidying never takes this composer for blank meanwhile.
+  const handleContextPaste = useCallback(async () => {
+    if (disabled) return
+    const settle = attach.beginIntake()
+    try {
+      await pasteFromClipboard()
+    } finally {
+      settle()
+    }
+  }, [attach, disabled, pasteFromClipboard])
 
   // Bridges the composer's Ctrl/⌘+Shift+V key to the plain-text paste above.
   // Returns whether the shortcut was consumed: when disabled or when the async
@@ -1968,7 +2035,11 @@ export function MessageInput({
                   handleSlashSelect(cmd)
                 }}
               >
-                <CommandOptionLabel command={cmd} />
+                <CommandOptionLabel
+                  command={cmd}
+                  skill={skillCommandNames.has(cmd.name)}
+                  kindColumn={skillCommandNames.size > 0}
+                />
               </button>
             ))}
             {filteredSlashSkills.map((skill, i) => {

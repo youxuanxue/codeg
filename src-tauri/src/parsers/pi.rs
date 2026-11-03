@@ -481,6 +481,7 @@ impl AgentParser for PiParser {
 
     fn get_conversation(&self, conversation_id: &str) -> Result<ConversationDetail, ParseError> {
         if self.base_dir.exists() {
+            let mut by_filename: Option<PathBuf> = None;
             for entry in WalkDir::new(&self.base_dir)
                 .into_iter()
                 .filter_map(|e| e.ok())
@@ -489,11 +490,23 @@ impl AgentParser for PiParser {
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                // Match by the header `id` (the stable external id); fall back to
+                // Match by the header `id` (what listing reports); fall back to
                 // the filename uuid when a malformed file has no header.
                 if session_id_of(path).as_deref() == Some(conversation_id) {
                     return self.parse_detail(path, conversation_id);
                 }
+                // The filename carries the id pi reported when the session was
+                // created — pi-acp's ACP session id, which codeg stores. The
+                // header can still differ: a session loaded before its first
+                // prompt relaunches `pi --session <unwritten file>`, and pi then
+                // writes a fresh header id into that file (#1068). Accept the
+                // filename uuid, but only when no header matches.
+                if by_filename.is_none() && fallback_id(path) == conversation_id {
+                    by_filename = Some(path.to_path_buf());
+                }
+            }
+            if let Some(path) = by_filename {
+                return self.parse_detail(&path, conversation_id);
             }
         }
 
@@ -509,7 +522,8 @@ struct SessionParse {
     messages: Vec<UnifiedMessage>,
     first_ts: Option<DateTime<Utc>>,
     last_ts: Option<DateTime<Utc>>,
-    /// Header `id` (the stable external id; `None` when the header is missing).
+    /// Header `id` (the listed id; `None` when the header is missing). It can
+    /// differ from the filename uuid — see `get_conversation`.
     session_id: Option<String>,
     /// Header `cwd`.
     cwd: Option<String>,
@@ -861,6 +875,7 @@ fn parse_message_record(sp: &mut SessionParse, value: &Value, ts: DateTime<Utc>,
                     is_error,
                     agent_stats: None,
                     images: content_images(message.get("content")),
+                    exit_code: None,
                 }],
                 ts,
                 None,
@@ -943,6 +958,7 @@ fn parse_compaction(sp: &mut SessionParse, value: &Value, ts: DateTime<Utc>, idx
                 is_error: false,
                 agent_stats: None,
                 images: Vec::new(),
+                exit_code: None,
             },
         ],
         ts,
@@ -1067,6 +1083,7 @@ fn parse_bash_execution(sp: &mut SessionParse, value: &Value, ts: DateTime<Utc>,
             is_error,
             agent_stats: None,
             images: Vec::new(),
+            exit_code,
         }],
         ts,
         None,
@@ -2062,10 +2079,13 @@ mod tests {
         assert!(has_bash_use, "bashExecution becomes a bash ToolUse");
 
         let errored = detail.turns.iter().flat_map(|t| &t.blocks).any(|b| {
-            matches!(b, ContentBlock::ToolResult { is_error, output_preview, .. }
-                if *is_error && output_preview.as_deref() == Some("boom"))
+            matches!(b, ContentBlock::ToolResult { is_error, output_preview, exit_code, .. }
+                if *is_error && output_preview.as_deref() == Some("boom") && *exit_code == Some(1))
         });
-        assert!(errored, "a non-zero exitCode marks the bash result an error");
+        assert!(
+            errored,
+            "a non-zero exitCode marks the bash result an error, and is kept"
+        );
     }
 
     #[test]
@@ -2106,6 +2126,75 @@ mod tests {
         assert_eq!(summaries[0].id, id);
         let detail = parser.get_conversation(id).expect("detail survives malformed lines");
         assert!(detail.turns.iter().any(|t| matches!(t.role, TurnRole::User)));
+    }
+
+    /// REGRESSION (#1068): a session reloaded before its first prompt is named
+    /// after the ACP session id (the one codeg stores as `external_id`) but
+    /// carries a different header `id`. pi 1.0.0 + pi-acp 0.0.34 really write
+    /// this shape: `session/new`, then `session/load`, then a prompt. Matching
+    /// the header alone left every such conversation with an empty history.
+    #[test]
+    fn filename_uuid_finds_a_session_whose_header_id_differs() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path();
+        let acp_id = "01a18bd6-7bac-773a-a4b6-cdb58ac62a44";
+        let header_id = "01a18bd6-914a-76bc-9d69-00f93c18dc57";
+        write_session(
+            base,
+            "--Users-demo-my-app--",
+            &format!("2026-10-30T08-04-11-821Z_{acp_id}.jsonl"),
+            &sample_records(header_id),
+        );
+        let parser = PiParser::with_base_dir(base.to_path_buf());
+
+        assert_eq!(parser.list_conversations().expect("list")[0].id, header_id);
+
+        let detail = parser
+            .get_conversation(acp_id)
+            .expect("found by filename uuid");
+        assert!(detail
+            .turns
+            .iter()
+            .any(|t| matches!(t.role, TurnRole::User)));
+        // The id asked for comes back unchanged, so the open path does not
+        // rewrite `external_id` away from the id pi-acp's session map knows.
+        assert_eq!(detail.summary.id, acp_id);
+
+        assert!(
+            parser.get_conversation(header_id).is_ok(),
+            "header id still works"
+        );
+    }
+
+    /// The header `id` wins over another file's filename uuid, whatever order
+    /// the directory walk visits them in.
+    #[test]
+    fn header_id_match_wins_over_a_filename_match() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path();
+        let id = "01a18bd6-0000-7000-8000-000000000001";
+        // The decoy's filename names `id`; only the other file's header does.
+        let decoy: Vec<Value> = sample_records("01a18bd6-0000-7000-8000-000000000002")
+            .into_iter()
+            .map(|mut r| {
+                if r["type"] == "session_info" {
+                    r["name"] = json!("Filename match");
+                }
+                r
+            })
+            .collect();
+        write_session(base, "--Users-demo-a--", &format!("a_{id}.jsonl"), &decoy);
+        write_session(
+            base,
+            "--Users-demo-b--",
+            "b_other.jsonl",
+            &sample_records(id),
+        );
+
+        let detail = PiParser::with_base_dir(base.to_path_buf())
+            .get_conversation(id)
+            .expect("detail");
+        assert_eq!(detail.summary.title.as_deref(), Some("Build the app"));
     }
 
     #[test]
@@ -2542,7 +2631,7 @@ mod tests {
             ],
             id,
         );
-        let (output, is_error) = detail
+        let (output, is_error, exit_code) = detail
             .turns
             .iter()
             .flat_map(|t| &t.blocks)
@@ -2550,12 +2639,18 @@ mod tests {
                 ContentBlock::ToolResult {
                     output_preview,
                     is_error,
+                    exit_code,
                     ..
-                } => Some((output_preview.clone().unwrap_or_default(), *is_error)),
+                } => Some((
+                    output_preview.clone().unwrap_or_default(),
+                    *is_error,
+                    *exit_code,
+                )),
                 _ => None,
             })
             .expect("the bash result");
         assert!(is_error, "a cancelled run is not a success");
+        assert_eq!(exit_code, None, "an interrupted run never got a code");
         assert!(output.contains("partial"), "the output is kept: {output}");
         assert!(output.contains("[cancelled]"), "got: {output}");
         assert!(output.contains("/tmp/pi-out.txt"), "got: {output}");
