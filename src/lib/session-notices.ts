@@ -50,7 +50,7 @@ const COMPACTION_ADVISORY = /\bmultiple compactions\b/i
  * session failure and showing it as an error on every turn is misleading.
  */
 const CLAUDE_AUTO_MODE_GATEWAY_ADVISORY =
-  /auto mode[\s\S]*classifier requests[\s\S]*api\.tokenkey\.dev[\s\S]*not compatible/i
+  /auto mode[\s\S]*classifier requests[\s\S]*api\.tokenkey\.dev[\s\S]*(?:not|isn't) compatible/i
 
 export function isClaudeAutoModeGatewayAdvisory(
   notice: SessionNotice
