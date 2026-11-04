@@ -132,6 +132,10 @@ export function WorkspaceFolderDialog({
 
   const nativePickerAvailable =
     isDesktop() && getActiveRemoteConnectionId() === null
+  const workspaceInitialPath =
+    !isDesktop() || getActiveRemoteConnectionId() !== null
+      ? "/projects"
+      : undefined
 
   const linkBrowseStart = useMemo(
     () =>
@@ -403,6 +407,7 @@ export function WorkspaceFolderDialog({
             <DirectoryBrowser
               ref={rootBrowserRef}
               active={open && view === "pick-root"}
+              initialPath={workspaceInitialPath}
               value={rootPath}
               onValueChange={setRootPath}
               onQuickSelect={commitRoot}

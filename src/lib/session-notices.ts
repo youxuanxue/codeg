@@ -44,6 +44,23 @@ export interface NoticeToast {
 const COMPACTION_ADVISORY = /\bmultiple compactions\b/i
 
 /**
+ * Claude Code emits this upstream gateway compatibility advisory on every
+ * session when Auto mode uses a gateway that has not implemented classifier
+ * billing. It is actionable for the gateway operator, but is not a Codeg
+ * session failure and showing it as an error on every turn is misleading.
+ */
+const CLAUDE_AUTO_MODE_GATEWAY_ADVISORY =
+  /auto mode[\s\S]*classifier requests[\s\S]*api\.tokenkey\.dev[\s\S]*not compatible/i
+
+export function isClaudeAutoModeGatewayAdvisory(
+  notice: SessionNotice
+): boolean {
+  return CLAUDE_AUTO_MODE_GATEWAY_ADVISORY.test(
+    `${notice.title}\n${notice.description ?? ""}`
+  )
+}
+
+/**
  * Whether a notice only restates a context compaction.
  *
  * Compaction already has its own surface: the transcript's compaction card
@@ -109,7 +126,12 @@ export function presentSessionNotice(
   connectionId: string,
   notice: SessionNotice
 ): NoticeToast | null {
-  if (isCompactionEchoNotice(notice)) return null
+  if (
+    isCompactionEchoNotice(notice) ||
+    isClaudeAutoModeGatewayAdvisory(notice)
+  ) {
+    return null
+  }
   const headline = splitHeadline(notice.title, notice.description)
   if (!headline) return null
   const level = noticeLevel(notice.severity)

@@ -78,6 +78,7 @@ import { ComposerConnectionStatus } from "@/components/chat/composer-connection-
 import { SessionSettingsPicker } from "@/components/chat/session-settings-picker"
 import {
   buildSessionSettings,
+  hasConfigModeOption,
   type SessionSettingTarget,
 } from "@/lib/session-settings"
 import { useAgentSkills } from "@/hooks/use-agent-skills"
@@ -933,7 +934,9 @@ export function MessageInput({
     return availableModes[0]?.id ?? null
   }, [hasModes, selectedModeId, availableModes])
   const showModeSelector =
-    hasModes && Boolean(effectiveModeId) && !hasConfigOptions
+    hasModes &&
+    Boolean(effectiveModeId) &&
+    !hasConfigModeOption(availableConfigOptions)
   const showModeLoading = modeLoading && !hasConfigOptions && !showModeSelector
   const showConfigLoading = configOptionsLoading && !hasConfigOptions
   const showSelectorsLoading = showConfigLoading || showModeLoading
@@ -1854,9 +1857,9 @@ export function MessageInput({
   const boxMinHeight = composerBoxMinHeight(tall)
   const editableMinHeight = composerEditableMinHeight(tall, hasImageAttachments)
 
-  // The agent's settings — its config options, or the legacy mode list for an
-  // agent that publishes none (the two never show together, see
-  // `showModeSelector`) — as the one ordered list the settings chip edits.
+  // The agent's settings — config options plus an independent ACP mode list
+  // when the agent publishes one — as the one ordered list the settings chip
+  // edits.
   const sessionSettings = useMemo(
     () =>
       buildSessionSettings({

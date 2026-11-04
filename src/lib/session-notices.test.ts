@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  isClaudeAutoModeGatewayAdvisory,
   isCompactionEchoNotice,
   presentSessionNotice,
   splitHeadline,
@@ -64,12 +65,45 @@ describe("isCompactionEchoNotice", () => {
   })
 })
 
+describe("isClaudeAutoModeGatewayAdvisory", () => {
+  it("recognizes TokenKey's repeated classifier billing advisory", () => {
+    expect(
+      isClaudeAutoModeGatewayAdvisory(
+        notice(
+          "warning",
+          "We're changing auto mode to no longer charge for classifier requests in Claude Code. However, this session isn't eligible because your requests go through api.tokenkey.dev, which isn't compatible with this update. Nothing breaks: auto mode keeps working, and its classifier requests are billed as before."
+        )
+      )
+    ).toBe(true)
+  })
+
+  it("does not hide unrelated Claude notices", () => {
+    expect(
+      isClaudeAutoModeGatewayAdvisory(
+        notice("warning", "Auto mode is unavailable for this model.")
+      )
+    ).toBe(false)
+  })
+})
+
 describe("presentSessionNotice", () => {
   it("drops compaction echoes entirely", () => {
     expect(
       presentSessionNotice(
         "conn-1",
         notice("warning", "Heads up: multiple compactions hurt accuracy.")
+      )
+    ).toBeNull()
+  })
+
+  it("drops the gateway billing advisory instead of presenting it as an error", () => {
+    expect(
+      presentSessionNotice(
+        "conn-1",
+        notice(
+          "warning",
+          "Auto mode classifier requests through api.tokenkey.dev are not compatible with this update."
+        )
       )
     ).toBeNull()
   })
