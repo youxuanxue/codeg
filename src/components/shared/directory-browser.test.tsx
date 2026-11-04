@@ -18,6 +18,8 @@ const api = vi.hoisted(() => ({
   createDirectory: vi.fn(),
 }))
 vi.mock("@/lib/api", () => api)
+vi.mock("@/lib/platform", () => ({ isDesktop: () => false }))
+vi.mock("@/lib/transport", () => ({ getActiveRemoteConnectionId: () => null }))
 
 const dir = (
   name: string,
