@@ -636,6 +636,11 @@ describe("WorkspaceFolderDialog — native picker", () => {
   it("only fills the path box — opening still waits for the confirm", async () => {
     platform.desktop = true
     platform.openFileDialog.mockResolvedValue("/home/me/picked")
+    api.listDirectoryEntries.mockImplementation((path: string) =>
+      path === "/home/me"
+        ? Promise.resolve([dir("codes", "/home/me/codes", true)])
+        : Promise.resolve([])
+    )
     render(<Harness />)
     await screen.findByDisplayValue("/home/me/codes")
 

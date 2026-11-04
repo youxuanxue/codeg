@@ -51,7 +51,7 @@ function Harness({ initialPath }: { initialPath?: string }) {
   )
 }
 
-/** The picker probes these before falling back to the account home. */
+/** A guessed projects path is not a readable directory in the default mock. */
 function missingProjectRoot(path: string): boolean {
   return path.endsWith("/codes") || path.endsWith("/Codes")
 }
@@ -81,6 +81,9 @@ beforeEach(() => {
 describe("DirectoryBrowserDialog", () => {
   it("opens ~/codes when that directory exists and no path was given", async () => {
     api.listDirectoryEntries.mockImplementation((path: string) => {
+      if (path === "/home/me") {
+        return Promise.resolve([dir("codes", "/home/me/codes", true)])
+      }
       if (path === "/home/me/codes") {
         return Promise.resolve([dir("codeg", "/home/me/codes/codeg")])
       }
