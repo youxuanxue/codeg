@@ -52,6 +52,9 @@ COPY --from=backend /app/src-tauri/target/release/codeg-mcp /usr/local/bin/codeg
 # its discovery file under CODEG_DATA_DIR (/data/cli).
 COPY --from=backend /app/src-tauri/target/release/codeg-cli /usr/local/bin/codeg-cli
 COPY --from=frontend /app/out /app/web
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY codeg-host-proxy.js /usr/local/bin/codeg-host-proxy.js
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV CODEG_STATIC_DIR=/app/web
 ENV CODEG_DATA_DIR=/data
@@ -71,6 +74,8 @@ EXPOSE 3080
 EXPOSE 3081-3090
 VOLUME /data
 VOLUME /root/.codeg/npm-global
+
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Run under the built-in supervisor (PID 1) so an in-place upgrade can swap
 # the binary and have the worker relaunched without stopping the container.

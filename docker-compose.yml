@@ -1,6 +1,8 @@
 services:
   codeg:
     build: .
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Or use a pre-built image:
     # image: xintaofei/codeg:latest
     ports:
@@ -32,6 +34,9 @@ services:
       - CODEG_HOST=0.0.0.0
       - NPM_CONFIG_PREFIX=/root/.codeg/npm-global
       - PATH=/root/.codeg/npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - CODEG_HOST_PROXY_ENABLED=${CODEG_HOST_PROXY_ENABLED:-1}
+      - CODEG_HOST_PROXY_HOST=${CODEG_HOST_PROXY_HOST:-host.docker.internal}
+      - CODEG_HOST_PROXY_PORT=${CODEG_HOST_PROXY_PORT:-7890}
       # The host's CLI config may contain loopback proxy settings. They point
       # at the container unless explicitly replaced for this deployment.
       - HTTP_PROXY=${CODEG_HTTP_PROXY:-}

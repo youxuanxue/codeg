@@ -342,9 +342,13 @@ The host directory appears as `/projects` in Codeg's folder picker. The
 and recreation. The Compose file also mounts the native configuration stores
 for Claude, Codex, Gemini, Pi, and Kimi under `/root`; each CLI uses its own
 configuration without any cc-switch integration, and can update its own
-sessions or refreshed credentials. Set
-`CODEG_HTTP_PROXY` or `CODEG_HTTPS_PROXY` when the host configuration depends
-on a proxy reachable from the container.
+sessions or refreshed credentials. By default, the Compose image bridges
+`127.0.0.1:7890` inside the container to `host.docker.internal:7890`, so
+desktop proxy settings copied from the host keep working without editing the
+host files. Set `CODEG_HOST_PROXY_ENABLED=0` to disable the bridge, or set
+`CODEG_HOST_PROXY_HOST` and `CODEG_HOST_PROXY_PORT` for another host proxy.
+Use `CODEG_HTTP_PROXY` or `CODEG_HTTPS_PROXY` only when you want to override
+the environment passed to Codeg itself.
 
 Either way, open `http://<host>:3080` in a browser and enter the access token the server prints when it starts (`docker logs` shows it for the container), or set `CODEG_TOKEN` to choose your own.
 
