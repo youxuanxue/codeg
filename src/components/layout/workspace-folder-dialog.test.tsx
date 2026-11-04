@@ -637,7 +637,7 @@ describe("WorkspaceFolderDialog — native picker", () => {
     platform.desktop = true
     platform.openFileDialog.mockResolvedValue("/home/me/picked")
     render(<Harness />)
-    await screen.findByDisplayValue("/home/me")
+    await screen.findByDisplayValue("/home/me/codes")
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "System picker" }))
