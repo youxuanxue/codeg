@@ -322,8 +322,33 @@ $env:CODEG_STATIC_DIR="$env:LOCALAPPDATA\codeg-server\web"; codeg-server
 **Docker** — the same server, in one container:
 
 ```bash
-docker run -d -p 3080:3080 -v codeg-data:/data ghcr.io/spacering-net/codeg:latest
+docker run -d -p 3080:3080 \
+  -v codeg-data:/data \
+  -v codeg-npm-global:/root/.codeg/npm-global \
+  ghcr.io/spacering-net/codeg:latest
 ```
+
+The Docker image includes the built-in ACP adapters and CLI runtimes. For a
+Compose deployment, mount the npm prefix and your host projects directory:
+
+```bash
+CODEG_PROJECTS_DIR="$HOME/codes" \
+  CODEG_AGENT_HOME="$HOME" \
+  docker compose up -d --build
+```
+
+The host directory appears as `/projects` in Codeg's folder picker. The
+`codeg-npm-global` volume keeps installed runtimes across container restarts
+and recreation. The Compose file also mounts the native configuration stores
+for Claude, Codex, Gemini, Pi, and Kimi under `/root`; each CLI uses its own
+configuration without any cc-switch integration, and can update its own
+sessions or refreshed credentials. By default, the Compose image bridges
+`127.0.0.1:7890` inside the container to `host.docker.internal:7890`, so
+desktop proxy settings copied from the host keep working without editing the
+host files. Set `CODEG_HOST_PROXY_ENABLED=0` to disable the bridge, or set
+`CODEG_HOST_PROXY_HOST` and `CODEG_HOST_PROXY_PORT` for another host proxy.
+Use `CODEG_HTTP_PROXY` or `CODEG_HTTPS_PROXY` only when you want to override
+the environment passed to Codeg itself.
 
 Either way, open `http://<host>:3080` in a browser and enter the access token the server prints when it starts (`docker logs` shows it for the container), or set `CODEG_TOKEN` to choose your own.
 

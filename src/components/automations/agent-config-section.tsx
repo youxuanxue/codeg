@@ -14,7 +14,10 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { SessionSettingsPicker } from "@/components/chat/session-settings-picker"
-import { buildSessionSettings } from "@/lib/session-settings"
+import {
+  buildSessionSettings,
+  hasConfigModeOption,
+} from "@/lib/session-settings"
 import { cn } from "@/lib/utils"
 import type {
   AgentOptionsSnapshot,
@@ -172,9 +175,9 @@ export function AgentConfigSection({
       </div>
     )
   }
-  // Mirror the composer: when an agent exposes both modes AND config options,
-  // hide the standalone mode row (some agents surface mode as a config option).
-  const showMode = hasModes && !hasOptions
+  // Keep an independent ACP mode row alongside model/effort options. Hide it
+  // only when the agent already publishes mode as a config option.
+  const showMode = hasModes && !hasConfigModeOption(snapshot.config_options)
   const modes = showMode ? snapshot.modes : null
 
   if (inline) {
