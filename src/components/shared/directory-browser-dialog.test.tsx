@@ -241,14 +241,14 @@ describe("DirectoryBrowserDialog", () => {
         ? Promise.resolve([dir("work", "/home/me/work", true)])
         : Promise.resolve([])
     })
-    render(<Harness />) // no initialPath -> home, ~/codes is absent
+    render(<Harness />) // no initialPath -> ~/codes is absent, so home
 
     // First open settles on /home/me; pick a sub-path to create a stale value.
     await screen.findByText("work")
     fireEvent.click(screen.getByText("work"))
     await screen.findByDisplayValue("/home/me/work")
 
-    // Close, then reopen while getHomeDirectory is still pending.
+    // Close, then reopen while default directory resolution is still pending.
     act(() => setOpenExternal(false))
     act(() => setOpenExternal(true))
 
@@ -272,7 +272,7 @@ describe("DirectoryBrowserDialog", () => {
       .mockResolvedValueOnce("/home/v2") // reopen settles immediately
     render(<Harness />)
 
-    // Close and reopen before the first open's getHomeDirectory resolves.
+    // Close and reopen before the first default directory resolution resolves.
     act(() => setOpenExternal(false))
     act(() => setOpenExternal(true))
     await screen.findByDisplayValue("/home/v2")
@@ -415,7 +415,7 @@ describe("DirectoryBrowserDialog", () => {
     api.getHomeDirectory.mockReset()
     api.getHomeDirectory.mockImplementationOnce(() => home.promise)
     api.listDirectoryEntries.mockResolvedValue([])
-    render(<Harness />) // no initialPath -> getHomeDirectory (pending)
+    render(<Harness />) // no initialPath -> default directory resolution (pending)
 
     // While the start dir is still loading, navigate away.
     fireEvent.change(screen.getByRole("textbox"), {
@@ -424,7 +424,8 @@ describe("DirectoryBrowserDialog", () => {
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" })
     await screen.findByDisplayValue("/typed/dir")
 
-    // getHomeDirectory finally resolves; init must NOT overwrite the user's path.
+    // The default directory resolution finally resolves; init must NOT overwrite
+    // the user's path.
     await act(async () => {
       home.resolve("/home/me")
       await Promise.resolve()
