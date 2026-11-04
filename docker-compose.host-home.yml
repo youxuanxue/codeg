@@ -1,0 +1,29 @@
+# Opt-in overlay: agent sessions use the host account at the same paths as a
+# local CLI. Compose expands ${HOME} on the host. Do not name this file
+# docker-compose.override.yml; that name is applied automatically.
+#
+#   CODEG_PROJECTS_DIR="$HOME/Codes" \
+#     docker compose -f docker-compose.yml -f docker-compose.host-home.yml up -d
+#
+# Codex SQLite stays on codeg-codex-home. Refresh GitHub auth on the host
+# with docker/refresh-gh-token.sh when it changes.
+services:
+  codeg:
+    volumes: !override
+      - codeg-data:/data
+      - codeg-npm-global:/root/.codeg/npm-global
+      - codeg-codex-home:/root/.codex
+      # Separate mount so the container volume at /root/.codex cannot hide
+      # the host directory the linker reads.
+      - ${HOME}/.codex:/mnt/host-codex
+      - ${HOME}:${HOME}
+      - ${CODEG_PROJECTS_DIR:-./projects}:/projects
+      - ./docker/host-home.sh:/opt/codeg/host-home.sh:ro
+    environment:
+      - HOME=${HOME}
+      - CODEX_HOME=/root/.codex
+    entrypoint: ["docker-entrypoint.sh"]
+    command: ["bash", "/opt/codeg/host-home.sh", "codeg-server", "--supervise"]
+
+volumes:
+  codeg-codex-home:
