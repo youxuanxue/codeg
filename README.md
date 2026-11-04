@@ -342,7 +342,22 @@ The host directory appears as `/projects` in Codeg's folder picker. The
 and recreation. The Compose file also mounts the native configuration stores
 for Claude, Codex, Gemini, Pi, and Kimi under `/root`; each CLI uses its own
 configuration without any cc-switch integration, and can update its own
-sessions or refreshed credentials. By default, the Compose image bridges
+sessions or refreshed credentials.
+
+To give those sessions the same home path as a local CLI (git identity, SSH
+keys, and Claude settings that use absolute paths under `$HOME`), add the
+host-home overlay. Codex's SQLite files stay on a container volume so they
+are not shared with a desktop Codex over a macOS bind mount.
+
+```bash
+CODEG_PROJECTS_DIR="$HOME/Codes" \
+  docker compose -f docker-compose.yml -f docker-compose.host-home.yml up -d
+bash docker/refresh-gh-token.sh
+```
+
+`docker/refresh-gh-token.sh` writes `~/.config/codeg/gh-token` (mode 600) from
+the host `gh` login. The container reads that file into `GH_TOKEN` and does
+not modify the host gitconfig. By default, the Compose image bridges
 `127.0.0.1:7890` inside the container to `host.docker.internal:7890`, so
 desktop proxy settings copied from the host keep working without editing the
 host files. Set `CODEG_HOST_PROXY_ENABLED=0` to disable the bridge, or set
