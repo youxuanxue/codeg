@@ -51,6 +51,11 @@ function Harness({ initialPath }: { initialPath?: string }) {
   )
 }
 
+/** A guessed projects path is not a readable directory in the default mock. */
+function missingProjectRoot(path: string): boolean {
+  return path.endsWith("/codes") || path.endsWith("/Codes")
+}
+
 const deferred = <T,>() => {
   let resolve: (value: T) => void = () => {}
   const promise = new Promise<T>((res) => {
@@ -66,10 +71,30 @@ beforeEach(() => {
   api.getHomeDirectory.mockReset()
   api.getHomeDirectory.mockResolvedValue("/home/me")
   api.listDirectoryEntries.mockReset()
-  api.listDirectoryEntries.mockResolvedValue([])
+  api.listDirectoryEntries.mockImplementation((path: string) =>
+    missingProjectRoot(path)
+      ? Promise.reject(new Error("missing"))
+      : Promise.resolve([])
+  )
 })
 
 describe("DirectoryBrowserDialog", () => {
+  it("opens ~/codes when that directory exists and no path was given", async () => {
+    api.listDirectoryEntries.mockImplementation((path: string) => {
+      if (path === "/home/me") {
+        return Promise.resolve([dir("codes", "/home/me/codes", true)])
+      }
+      if (path === "/home/me/codes") {
+        return Promise.resolve([dir("codeg", "/home/me/codes/codeg")])
+      }
+      return Promise.reject(new Error("missing"))
+    })
+    render(<Harness />)
+
+    await screen.findByDisplayValue("/home/me/codes")
+    expect(screen.getByText("codeg")).toBeInTheDocument()
+  })
+
   it("pre-fills the initial path and confirms it without a tree click", async () => {
     api.listDirectoryEntries.mockResolvedValue([
       dir("work", "/home/me/work", true),
@@ -213,19 +238,20 @@ describe("DirectoryBrowserDialog", () => {
     api.getHomeDirectory
       .mockResolvedValueOnce("/home/me") // first open settles immediately
       .mockImplementationOnce(() => home2.promise) // reopen stays pending
-    api.listDirectoryEntries.mockImplementation((p: string) =>
-      p === "/home/me"
+    api.listDirectoryEntries.mockImplementation((p: string) => {
+      if (missingProjectRoot(p)) return Promise.reject(new Error("missing"))
+      return p === "/home/me"
         ? Promise.resolve([dir("work", "/home/me/work", true)])
         : Promise.resolve([])
-    )
-    render(<Harness />) // no initialPath -> uses getHomeDirectory
+    })
+    render(<Harness />) // no initialPath -> ~/codes is absent, so home
 
     // First open settles on /home/me; pick a sub-path to create a stale value.
     await screen.findByText("work")
     fireEvent.click(screen.getByText("work"))
     await screen.findByDisplayValue("/home/me/work")
 
-    // Close, then reopen while getHomeDirectory is still pending.
+    // Close, then reopen while default directory resolution is still pending.
     act(() => setOpenExternal(false))
     act(() => setOpenExternal(true))
 
@@ -249,7 +275,7 @@ describe("DirectoryBrowserDialog", () => {
       .mockResolvedValueOnce("/home/v2") // reopen settles immediately
     render(<Harness />)
 
-    // Close and reopen before the first open's getHomeDirectory resolves.
+    // Close and reopen before the first default directory resolution resolves.
     act(() => setOpenExternal(false))
     act(() => setOpenExternal(true))
     await screen.findByDisplayValue("/home/v2")
@@ -270,9 +296,10 @@ describe("DirectoryBrowserDialog", () => {
     api.getHomeDirectory
       .mockResolvedValueOnce("/home/me") // first open
       .mockResolvedValueOnce("/home/v2") // reopen
-    api.listDirectoryEntries.mockImplementation((p: string) =>
-      p === "/slow/dir" ? slow.promise : Promise.resolve([])
-    )
+    api.listDirectoryEntries.mockImplementation((p: string) => {
+      if (missingProjectRoot(p)) return Promise.reject(new Error("missing"))
+      return p === "/slow/dir" ? slow.promise : Promise.resolve([])
+    })
     render(<Harness />)
     await screen.findByDisplayValue("/home/me")
 
@@ -300,7 +327,6 @@ describe("DirectoryBrowserDialog", () => {
   it("initializes correctly under StrictMode despite effect replay", async () => {
     api.getHomeDirectory.mockReset()
     api.getHomeDirectory.mockResolvedValue("/home/me")
-    api.listDirectoryEntries.mockResolvedValue([])
     render(
       <StrictMode>
         <Harness />
@@ -321,6 +347,7 @@ describe("DirectoryBrowserDialog", () => {
       .mockResolvedValueOnce("/home/me") // open #1
       .mockResolvedValueOnce("/home/me") // reopen
     api.listDirectoryEntries.mockImplementation((p: string) => {
+      if (missingProjectRoot(p)) return Promise.reject(new Error("missing"))
       if (p === "/slow/a") return slowA.promise
       if (p === "/slow/b") return slowB.promise
       return Promise.resolve([])
@@ -391,7 +418,7 @@ describe("DirectoryBrowserDialog", () => {
     api.getHomeDirectory.mockReset()
     api.getHomeDirectory.mockImplementationOnce(() => home.promise)
     api.listDirectoryEntries.mockResolvedValue([])
-    render(<Harness />) // no initialPath -> getHomeDirectory (pending)
+    render(<Harness />) // no initialPath -> default directory resolution (pending)
 
     // While the start dir is still loading, navigate away.
     fireEvent.change(screen.getByRole("textbox"), {
@@ -400,7 +427,8 @@ describe("DirectoryBrowserDialog", () => {
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" })
     await screen.findByDisplayValue("/typed/dir")
 
-    // getHomeDirectory finally resolves; init must NOT overwrite the user's path.
+    // The default directory resolution finally resolves; init must NOT overwrite
+    // the user's path.
     await act(async () => {
       home.resolve("/home/me")
       await Promise.resolve()

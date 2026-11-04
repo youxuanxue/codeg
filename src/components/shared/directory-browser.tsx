@@ -48,6 +48,7 @@ import {
   toLocalizedErrorMessage,
   type AppErrorTranslator,
 } from "@/lib/app-error"
+import { resolveDefaultBrowseDirectory } from "@/lib/default-browse-directory"
 import { parentFsPath } from "@/lib/path-utils"
 import type { DirectoryEntry } from "@/lib/types"
 
@@ -301,7 +302,7 @@ export const DirectoryBrowser = forwardRef<
 
     const init = async () => {
       try {
-        const startPath = initialPath || (await getHomeDirectory())
+        const startPath = initialPath || (await resolveDefaultBrowseDirectory())
         // Drop these writes if a hide/show superseded this init, or the user
         // already navigated somewhere else while the start dir was loading.
         if (gen !== sessionGen.current || seq !== navSeq.current) return
