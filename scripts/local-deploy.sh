@@ -91,22 +91,33 @@ EOF
 EOF
 }
 
+# Columns that store a host path. A column missing from an older schema is
+# skipped rather than failing the import.
+PATH_COLUMNS=(
+  folder.path
+  conversation.origin_cwd
+  folder_link.target_path
+  canvas_node.path
+  custom_agent.skills_dir
+)
+
 # rewrite_container_paths <db> <projects dir>
-# Container folder paths (/projects/x, /root/codes/x) become host paths.
+# Container paths (/projects/x, /root/codes/x) become <projects dir>/x.
 rewrite_container_paths() {
   local db=$1 projects=${2%/}
-  local q=${projects//\'/\'\'}
-  sqlite3 "$db" <<SQL
-PRAGMA wal_checkpoint(TRUNCATE);
-UPDATE folder SET path = '$q/' || substr(path, length('/projects/') + 1)
-  WHERE path LIKE '/projects/%';
-UPDATE folder SET path = '$q/' || substr(path, length('/root/codes/') + 1)
-  WHERE path LIKE '/root/codes/%';
-UPDATE conversation SET origin_cwd = '$q/' || substr(origin_cwd, length('/projects/') + 1)
-  WHERE origin_cwd LIKE '/projects/%';
-UPDATE conversation SET origin_cwd = '$q/' || substr(origin_cwd, length('/root/codes/') + 1)
-  WHERE origin_cwd LIKE '/root/codes/%';
-SQL
+  local q=${projects//\'/\'\'} sql="PRAGMA wal_checkpoint(TRUNCATE);" entry table col prefix
+  for entry in "${PATH_COLUMNS[@]}"; do
+    table=${entry%%.*}; col=${entry#*.}
+    if [ -z "$(sqlite3 "$db" "SELECT 1 FROM pragma_table_info('$table') WHERE name = '$col'")" ]; then
+      continue
+    fi
+    for prefix in /projects/ /root/codes/; do
+      sql+="
+UPDATE $table SET $col = '$q/' || substr($col, length('$prefix') + 1)
+  WHERE $col LIKE '$prefix%';"
+    done
+  done
+  sqlite3 "$db" "$sql" || return 1
 }
 
 pinned_pnpm() {
@@ -147,30 +158,37 @@ cmd_import_docker() {
   local container=${1:-codeg-local}
   command -v docker >/dev/null || die "docker not found"
   command -v sqlite3 >/dev/null || die "sqlite3 not found"
-  if [ -e "$DATA/codeg.db" ]; then
-    die "$DATA/codeg.db exists; move it away before importing"
-  fi
-  local backup="$HOME/.local/share/codeg-migrate/$container-$(date +%Y%m%d%H%M%S)"
-  mkdir -p "$backup" "$DATA"
+  [ -e "$DATA" ] && die "$DATA exists; move it away before importing"
 
+  local stage
+  stage=$(mktemp -d "${DATA%/}.import.XXXXXX") || die "cannot create a stage dir"
   # Stop first so the copied SQLite files are consistent. The container is
-  # kept (restart disabled) as a rollback path.
-  docker update --restart=no "$container" >/dev/null
-  docker stop "$container" >/dev/null
-  docker cp "$container:/data/." "$backup/"
-  cp -R "$backup/." "$DATA/"
+  # kept (restart disabled) as a rollback path. Each step checks itself:
+  # errexit is off when a caller runs this inside a condition.
+  docker update --restart=no "$container" >/dev/null || die "docker update failed"
+  docker stop "$container" >/dev/null || die "docker stop failed"
+  docker cp "$container:/data/." "$stage/" || die "docker cp failed; partial copy in $stage"
+  [ -f "$stage/codeg.db" ] || die "no codeg.db in $container:/data; copy in $stage"
   # Linux binaries and a credential helper pointing at /data do not carry over.
-  rm -rf "$DATA/acp-binaries" "$DATA/cli" "$DATA/git-credential-codeg.sh" \
-    "$DATA"/codeg.db.*lock
-  rewrite_container_paths "$DATA/codeg.db" "$PROJECTS"
+  rm -rf "$stage/acp-binaries" "$stage/cli" "$stage/git-credential-codeg.sh" \
+    "$stage"/codeg.db.*lock
+  rewrite_container_paths "$stage/codeg.db" "$PROJECTS" || die "path rewrite failed; copy in $stage"
+  # DATA appears only once the rewrite succeeded; a failed run leaves the
+  # stage directory to inspect and nothing in the way of a retry.
+  mv "$stage" "$DATA" || die "cannot move $stage to $DATA"
   sqlite3 "$DATA/codeg.db" 'SELECT id, path FROM folder'
-  echo "container data backup: $backup"
+  echo "imported $container into $DATA (container kept, stopped)"
 }
 
+# Exits non-zero when the agent is not loaded or the port does not answer.
 cmd_status() {
-  launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | sed -n '/state =/p;/pid =/p' \
-    || echo "not loaded"
-  curl -fsS -o /dev/null -w 'http %{http_code}\n' "http://127.0.0.1:$PORT/" || true
+  local info
+  if ! info=$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null); then
+    echo "not loaded"
+    return 1
+  fi
+  printf '%s\n' "$info" | awk -F' = ' '$1 ~ /^\t(state|pid)$/ {sub(/^\t/, ""); print}'
+  curl -fsS -o /dev/null -w 'http %{http_code}\n' "http://127.0.0.1:$PORT/"
 }
 
 cmd_uninstall() {
