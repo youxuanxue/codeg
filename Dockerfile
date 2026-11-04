@@ -23,8 +23,6 @@ RUN cargo build --release --bin codeg-server --no-default-features --features se
 
 # Stage 3: Runtime
 FROM node:24-bookworm-slim
-ENV NPM_CONFIG_PREFIX=/root/.codeg/npm-global
-ENV PATH=/root/.codeg/npm-global/bin:${PATH}
 RUN apt-get update && apt-get install -y \
     libsqlite3-0 \
     git \
@@ -35,9 +33,6 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     libicu72 \
     && rm -rf /var/lib/apt/lists/*
-COPY docker/install-agents.sh /usr/local/bin/install-codeg-agents
-RUN chmod +x /usr/local/bin/install-codeg-agents \
- && install-codeg-agents
 # libicu72: OfficeCLI ships as a self-contained binary with an embedded .NET
 # runtime, which requires the system ICU library at startup. node:*-bookworm-slim
 # bundles Node's own ICU statically and so does NOT install system libicu — without
@@ -52,9 +47,6 @@ COPY --from=backend /app/src-tauri/target/release/codeg-mcp /usr/local/bin/codeg
 # its discovery file under CODEG_DATA_DIR (/data/cli).
 COPY --from=backend /app/src-tauri/target/release/codeg-cli /usr/local/bin/codeg-cli
 COPY --from=frontend /app/out /app/web
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY codeg-host-proxy.js /usr/local/bin/codeg-host-proxy.js
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV CODEG_STATIC_DIR=/app/web
 ENV CODEG_DATA_DIR=/data
@@ -73,9 +65,6 @@ EXPOSE 3080
 # instead: those answer on 3080, and no range has to be guessed in advance.
 EXPOSE 3081-3090
 VOLUME /data
-VOLUME /root/.codeg/npm-global
-
-ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Run under the built-in supervisor (PID 1) so an in-place upgrade can swap
 # the binary and have the worker relaunched without stopping the container.
