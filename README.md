@@ -319,51 +319,32 @@ irm https://raw.githubusercontent.com/spacering-net/codeg/main/install.ps1 | iex
 $env:CODEG_STATIC_DIR="$env:LOCALAPPDATA\codeg-server\web"; codeg-server
 ```
 
+**This machine (macOS, from source)** — for a personal Mac, run the server
+natively instead of in Docker. Agents then use your own account: the same
+`HOME`, `PATH`, keychain, and `gh`/`aws`/`ssh` binaries as a terminal. A Linux
+container cannot give that, and a home directory mounted into one breaks again
+on every new machine.
+
+```bash
+CODEG_LOCAL_PROXY=http://127.0.0.1:7890 bash scripts/local-deploy.sh install
+bash scripts/local-deploy.sh status
+```
+
+This builds from the checkout, installs `codeg-server`/`codeg-mcp` into
+`~/.local/bin`, and registers the `com.codeg.server` launchd agent (starts at
+login, restarts on exit). Data lives in `~/codeg` (`CODEG_DATA_DIR`), the port
+is 3080 (`CODEG_PORT`), and every path is resolved on the machine that runs it.
+Re-run `install` after pulling to upgrade. To move an existing container's
+sessions, run
+`bash scripts/local-deploy.sh import-docker codeg-local` before `install`. It stops
+the container but keeps it as a rollback, and maps `/projects/...` to
+`CODEG_PROJECTS_DIR` (default `~/Codes`).
+
 **Docker** — the same server, in one container:
 
 ```bash
-docker run -d -p 3080:3080 \
-  -v codeg-data:/data \
-  -v codeg-npm-global:/root/.codeg/npm-global \
-  ghcr.io/spacering-net/codeg:latest
+docker run -d -p 3080:3080 -v codeg-data:/data ghcr.io/spacering-net/codeg:latest
 ```
-
-The Docker image includes the built-in ACP adapters and CLI runtimes. For a
-Compose deployment, mount the npm prefix and your host projects directory:
-
-```bash
-CODEG_PROJECTS_DIR="$HOME/codes" \
-  CODEG_AGENT_HOME="$HOME" \
-  docker compose up -d --build
-```
-
-The host directory appears as `/projects` in Codeg's folder picker. The
-`codeg-npm-global` volume keeps installed runtimes across container restarts
-and recreation. The Compose file also mounts the native configuration stores
-for Claude, Codex, Gemini, Pi, and Kimi under `/root`; each CLI uses its own
-configuration without any cc-switch integration, and can update its own
-sessions or refreshed credentials.
-
-To give those sessions the same home path as a local CLI (git identity, SSH
-keys, and Claude settings that use absolute paths under `$HOME`), add the
-host-home overlay. Codex's SQLite files stay on a container volume so they
-are not shared with a desktop Codex over a macOS bind mount.
-
-```bash
-CODEG_PROJECTS_DIR="$HOME/Codes" \
-  docker compose -f docker-compose.yml -f docker-compose.host-home.yml up -d
-bash docker/refresh-gh-token.sh
-```
-
-`docker/refresh-gh-token.sh` writes `~/.config/codeg/gh-token` (mode 600) from
-the host `gh` login. The container reads that file into `GH_TOKEN` and does
-not modify the host gitconfig. By default, the Compose image bridges
-`127.0.0.1:7890` inside the container to `host.docker.internal:7890`, so
-desktop proxy settings copied from the host keep working without editing the
-host files. Set `CODEG_HOST_PROXY_ENABLED=0` to disable the bridge, or set
-`CODEG_HOST_PROXY_HOST` and `CODEG_HOST_PROXY_PORT` for another host proxy.
-Use `CODEG_HTTP_PROXY` or `CODEG_HTTPS_PROXY` only when you want to override
-the environment passed to Codeg itself.
 
 Either way, open `http://<host>:3080` in a browser and enter the access token the server prints when it starts (`docker logs` shows it for the container), or set `CODEG_TOKEN` to choose your own.
 

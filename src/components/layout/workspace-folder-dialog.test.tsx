@@ -125,7 +125,7 @@ describe("WorkspaceFolderDialog — creation flow", () => {
       dir("other", "/home/me/other"),
     ])
     render(<Harness />)
-    await screen.findByDisplayValue("/projects")
+    await screen.findByDisplayValue("/home/me")
 
     fireEvent.click(screen.getByRole("button", { name: "root" }))
     await act(async () => {
@@ -144,7 +144,7 @@ describe("WorkspaceFolderDialog — creation flow", () => {
     api.listDirectoryEntries.mockResolvedValue([dir("root", "/home/me/root")])
     openFolder.mockRejectedValue(new Error("nope"))
     render(<Harness />)
-    await screen.findByDisplayValue("/projects")
+    await screen.findByDisplayValue("/home/me")
 
     fireEvent.click(screen.getByRole("button", { name: "root" }))
     await act(async () => {
@@ -158,11 +158,11 @@ describe("WorkspaceFolderDialog — creation flow", () => {
   it("makes a new folder and opens it as the workspace", async () => {
     api.listDirectoryEntries.mockImplementation((path: string) =>
       Promise.resolve(
-        path === "/projects" ? [dir("other", "/home/me/other")] : []
+        path === "/home/me" ? [dir("other", "/home/me/other")] : []
       )
     )
-    api.createDirectory.mockResolvedValue("/projects/fresh")
-    openFolder.mockResolvedValue(folder({ path: "/projects/fresh" }))
+    api.createDirectory.mockResolvedValue("/home/me/fresh")
+    openFolder.mockResolvedValue(folder({ path: "/home/me/fresh" }))
     render(<Harness />)
     await screen.findByText("other")
 
@@ -173,16 +173,16 @@ describe("WorkspaceFolderDialog — creation flow", () => {
       fireEvent.keyDown(name, { key: "Enter" })
     })
 
-    expect(api.createDirectory).toHaveBeenCalledWith("/projects", "fresh")
-    await screen.findByDisplayValue("/projects/fresh")
+    expect(api.createDirectory).toHaveBeenCalledWith("/home/me", "fresh")
+    await screen.findByDisplayValue("/home/me/fresh")
     // Creating is not opening: that still waits for Next.
     expect(openFolder).not.toHaveBeenCalled()
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Next" }))
     })
-    expect(openFolder).toHaveBeenCalledWith("/projects/fresh")
-    expect(await screen.findByText("/projects/fresh")).toBeInTheDocument()
+    expect(openFolder).toHaveBeenCalledWith("/home/me/fresh")
+    expect(await screen.findByText("/home/me/fresh")).toBeInTheDocument()
   })
 
   it("does not offer a new folder when picking link targets", async () => {
@@ -200,7 +200,7 @@ describe("WorkspaceFolderDialog — creation flow", () => {
   it("keeps a later pick when a new folder lands after the browser has gone", async () => {
     api.listDirectoryEntries.mockImplementation((path: string) =>
       Promise.resolve(
-        path === "/projects"
+        path === "/home/me"
           ? [dir("work", "/home/me/work"), dir("other", "/home/me/other")]
           : []
       )
@@ -248,14 +248,14 @@ describe("WorkspaceFolderDialog — creation flow", () => {
         })
       }
       return Promise.resolve(
-        path === "/projects"
+        path === "/home/me"
           ? [dir("work", "/home/me/work"), dir("other", "/home/me/other")]
           : []
       )
     })
     render(<Harness />)
     await screen.findByText("work")
-    const pathBox = screen.getByDisplayValue("/projects")
+    const pathBox = screen.getByDisplayValue("/home/me")
     fireEvent.change(pathBox, { target: { value: "/srv/slow" } })
     await act(async () => {
       fireEvent.keyDown(pathBox, { key: "Enter" })
@@ -636,13 +636,8 @@ describe("WorkspaceFolderDialog — native picker", () => {
   it("only fills the path box — opening still waits for the confirm", async () => {
     platform.desktop = true
     platform.openFileDialog.mockResolvedValue("/home/me/picked")
-    api.listDirectoryEntries.mockImplementation((path: string) =>
-      path === "/home/me"
-        ? Promise.resolve([dir("codes", "/home/me/codes", true)])
-        : Promise.resolve([])
-    )
     render(<Harness />)
-    await screen.findByDisplayValue("/home/me/codes")
+    await screen.findByDisplayValue("/home/me")
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "System picker" }))
@@ -697,7 +692,7 @@ describe("WorkspaceFolderDialog — native picker", () => {
 
   it("stays out of the way when there is no native picker", async () => {
     render(<Harness />)
-    await screen.findByDisplayValue("/projects")
+    await screen.findByDisplayValue("/home/me")
     expect(screen.queryByRole("button", { name: "System picker" })).toBeNull()
   })
 })
