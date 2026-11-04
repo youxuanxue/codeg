@@ -13,6 +13,9 @@ services:
       - codeg-data:/data
       - codeg-npm-global:/root/.codeg/npm-global
       - codeg-codex-home:/root/.codex
+      # Separate mount so the container volume at /root/.codex cannot hide
+      # the host directory the linker reads.
+      - ${HOME}/.codex:/mnt/host-codex
       - ${HOME}:${HOME}
       - ${CODEG_PROJECTS_DIR:-./projects}:/projects
       - ./docker/host-home.sh:/opt/codeg/host-home.sh:ro
