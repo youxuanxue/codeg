@@ -187,6 +187,23 @@ const PAYLOAD_EXAMPLES: Record<(typeof ALL_EVENT_TYPES)[number]["id"], string> =
   "parent_conversation_title": null,
   "source": "codeg"
 }`,
+    task_attention: `{
+  "event": "task_attention",
+  "level": "info",
+  "title": "Task Ready for Review",
+  "body": "Fix the login redirect",
+  "fields": [{ "label": "Project", "value": "web-app" }, { "label": "Summary", "value": "Redirect fixed; the retry path needs a look" }, { "label": "Changes", "value": "3 files, +42 −7" }, { "label": "Session", "value": "codeg://session/12" }],
+  "connection_id": "conn-abc",
+  "conversation_id": 12,
+  "conversation_title": "Fix the login redirect",
+  "agent_type": "claude_code",
+  "agent_name": "Claude Code",
+  "assistant_name": null,
+  "session_kind": "session",
+  "parent_conversation_id": null,
+  "parent_conversation_title": null,
+  "source": "codeg"
+}`,
   }
 
 export function ChannelEventsTab() {

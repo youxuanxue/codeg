@@ -351,10 +351,6 @@ async fn resolve_session_context(
         };
     };
 
-    let agent_name =
-        serde_json::from_value::<AgentType>(serde_json::Value::String(row.agent_type.clone()))
-            .ok()
-            .map(|agent| agent.to_string());
     let parent = match row.parent_id {
         Some(parent_id) => Some(ParentSession {
             conversation_id: parent_id,
@@ -367,6 +363,15 @@ async fn resolve_session_context(
         }),
         None => None,
     };
+    session_context_of(row, parent)
+}
+
+/// The webhook session fields a conversation row names.
+fn session_context_of(row: conversation::Model, parent: Option<ParentSession>) -> SessionContext {
+    let agent_name =
+        serde_json::from_value::<AgentType>(serde_json::Value::String(row.agent_type.clone()))
+            .ok()
+            .map(|agent| agent.to_string());
     SessionContext {
         conversation_id: Some(row.id),
         conversation_title: row.title,
@@ -515,6 +520,30 @@ pub fn spawn_task_attention_subscriber(
     })
 }
 
+/// The webhook session fields for a task's run, read from its conversation —
+/// the same fields an ACP event carries. A task's run is never a delegation
+/// sub-session, so `parent` stays empty.
+async fn task_session_context(
+    db: &DatabaseConnection,
+    conversation_id: Option<i32>,
+) -> SessionContext {
+    let row = match conversation_id {
+        Some(id) => conversation::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    match row {
+        Some(row) => session_context_of(row, None),
+        None => SessionContext {
+            conversation_id,
+            ..SessionContext::default()
+        },
+    }
+}
+
 /// One `task://changed` upsert: push when the task newly settled into review
 /// or failed, through the same global filter, per-channel filter and webhook
 /// fan-out as the ACP events. Not debounced: each settle is its own decision.
@@ -569,10 +598,7 @@ async fn process_task_change(
     pushed.insert(task_id, settled_at);
 
     if !config.webhooks.is_empty() {
-        let session = SessionContext {
-            conversation_id: task.conversation_id,
-            ..SessionContext::default()
-        };
+        let session = task_session_context(db_conn, task.conversation_id).await;
         let payload = super::webhook::build_webhook_payload(
             TASK_ATTENTION_EVENT,
             task.connection_id.as_deref().unwrap_or(""),
@@ -3109,6 +3135,55 @@ mod task_attention_tests {
         );
         run(id, &chat, &db, &cfg, &mut HashMap::new()).await;
         assert_eq!(rec.msgs.lock().await.len(), 1);
+    }
+
+    /// The webhook body names the run's conversation the way an ACP event's
+    /// does, so one consumer can route both.
+    #[tokio::test]
+    async fn the_webhook_carries_the_task_conversation() {
+        use crate::models::agent::AgentType;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let db = test_helpers::fresh_in_memory_db().await;
+        let (chat, _rec) = manager_with_recorder(7).await;
+        let id = task_in(&db, WorkTaskStatus::Review, chrono::Duration::seconds(1)).await;
+        let folder_id = work_task_service::get_model(&db.conn, id)
+            .await
+            .unwrap()
+            .folder_id;
+        let conv = test_helpers::seed_conversation(&db, folder_id, AgentType::ClaudeCode).await;
+        let row = work_task_service::get_model(&db.conn, id).await.unwrap();
+        let mut active: work_task::ActiveModel = row.into();
+        active.conversation_id = Set(Some(conv));
+        active.update(&db.conn).await.unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut cfg = config(7, None, None);
+        cfg.webhooks = vec![format!("http://{}/hook", listener.local_addr().unwrap())];
+        run(id, &chat, &db, &cfg, &mut HashMap::new()).await;
+
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("webhook delivered")
+            .unwrap();
+        let mut buf = vec![0u8; 16 * 1024];
+        let mut got = Vec::new();
+        while !String::from_utf8_lossy(&got).contains("\"source\"") {
+            let n = stream.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await;
+        let text = String::from_utf8_lossy(&got);
+        let body = &text[text.find('{').expect("json body")..];
+        let json: serde_json::Value = serde_json::from_str(body.trim_end_matches('\0')).unwrap();
+        assert_eq!(json["event"], TASK_ATTENTION_EVENT);
+        assert_eq!(json["conversation_id"], conv);
+        assert_eq!(json["agent_type"], "claude_code");
+        assert_eq!(json["session_kind"], "session");
     }
 
     #[tokio::test]
