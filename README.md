@@ -319,6 +319,27 @@ irm https://raw.githubusercontent.com/spacering-net/codeg/main/install.ps1 | iex
 $env:CODEG_STATIC_DIR="$env:LOCALAPPDATA\codeg-server\web"; codeg-server
 ```
 
+**This machine (macOS, from source)** — for a personal Mac, run the server
+natively instead of in Docker. Agents then use your own account: the same
+`HOME`, `PATH`, keychain, and `gh`/`aws`/`ssh` binaries as a terminal. A Linux
+container cannot give that, and a home directory mounted into one breaks again
+on every new machine.
+
+```bash
+CODEG_LOCAL_PROXY=http://127.0.0.1:7890 bash scripts/local-deploy.sh install
+bash scripts/local-deploy.sh status
+```
+
+This builds from the checkout, installs `codeg-server`/`codeg-mcp` into
+`~/.local/bin`, and registers the `com.codeg.server` launchd agent (starts at
+login, restarts on exit). Data lives in `~/codeg` (`CODEG_DATA_DIR`), the port
+is 3080 (`CODEG_PORT`), and every path is resolved on the machine that runs it.
+Re-run `install` after pulling to upgrade. To move an existing container's
+sessions, run
+`bash scripts/local-deploy.sh import-docker codeg-local` before `install`. It stops
+the container but keeps it as a rollback, and maps `/projects/...` to
+`CODEG_PROJECTS_DIR` (default `~/Codes`).
+
 **Docker** — the same server, in one container:
 
 ```bash

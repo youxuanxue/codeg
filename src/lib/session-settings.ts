@@ -6,9 +6,16 @@ import {
 } from "@/lib/model-config-groups"
 import type { SessionConfigOptionInfo, SessionModeInfo } from "@/lib/types"
 
-// The composer's agent settings — the session's config options, or the legacy
-// mode list for an agent that publishes no config options — normalized into the
-// one ordered list the merged trigger summarizes and its popover edits. Pure:
+/** True when an agent publishes its permission/session mode as a config option. */
+export function hasConfigModeOption(
+  options: SessionConfigOptionInfo[]
+): boolean {
+  return options.some((option) => option.category === "mode")
+}
+
+// The composer's agent settings — its config options plus an independent legacy
+// mode list when the agent publishes one — normalized into the one ordered list
+// the merged trigger summarizes and its popover edits. Pure:
 // commits are the caller's (see `SessionSettingTarget`).
 
 /** A list with more options than this gets a search box (the virtualized
@@ -208,8 +215,8 @@ function legacyModeSetting(
 
 export interface BuildSessionSettingsInput {
   configOptions: SessionConfigOptionInfo[]
-  /** The legacy mode list — pass it only when it is the agent's selector
-   *  (no config options), with the mode it is on. */
+  /** The ACP mode list, when it is independent from the config options, with
+   *  the mode it is on. */
   modes: SessionModeInfo[]
   currentModeId: string | null
   /** Localized title for the legacy mode setting. */

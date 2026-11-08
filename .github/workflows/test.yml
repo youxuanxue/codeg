@@ -214,6 +214,17 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo CODEG_INSTALL_TEST_STRICT=1 /bin/bash scripts/test-install-stop.sh install.sh
 
+  local-deploy:
+    name: local deploy script
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Path rewrite and launchd plist rendering
+        run: |
+          sudo apt-get install -y sqlite3 libxml2-utils
+          bash scripts/local-deploy_test.sh
+
   install-ps1:
     # Two Windows PowerShell 5.1 traps that PowerShell 7 never hits. First,
     # `.\install.ps1` reads a script without a BOM in the ANSI code page,
