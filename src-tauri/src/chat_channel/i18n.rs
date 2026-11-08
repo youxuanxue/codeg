@@ -1637,3 +1637,110 @@ pub fn agent_responding(lang: Lang, agent_label: &str) -> String {
         Lang::En => format!("{agent_label} is responding..."),
     }
 }
+
+// Work task attention (a task that now needs the user: review / failed)
+
+pub fn task_review_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "任务待审",
+        Lang::ZhTw => "任務待審",
+        Lang::Ja => "タスクのレビュー待ち",
+        Lang::Ko => "작업 검토 대기",
+        Lang::Es => "Tarea lista para revisar",
+        Lang::De => "Aufgabe wartet auf Prüfung",
+        Lang::Fr => "Tâche à relire",
+        Lang::Pt => "Tarefa pronta para revisão",
+        Lang::Ar => "المهمة بانتظار المراجعة",
+        Lang::En => "Task Ready for Review",
+    }
+}
+
+pub fn task_failed_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "任务失败",
+        Lang::ZhTw => "任務失敗",
+        Lang::Ja => "タスク失敗",
+        Lang::Ko => "작업 실패",
+        Lang::Es => "Tarea fallida",
+        Lang::De => "Aufgabe fehlgeschlagen",
+        Lang::Fr => "Échec de la tâche",
+        Lang::Pt => "Tarefa falhou",
+        Lang::Ar => "فشلت المهمة",
+        Lang::En => "Task Failed",
+    }
+}
+
+pub fn task_project_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "项目",
+        Lang::ZhTw => "專案",
+        Lang::Ja => "プロジェクト",
+        Lang::Ko => "프로젝트",
+        Lang::Es => "Proyecto",
+        Lang::De => "Projekt",
+        Lang::Fr => "Projet",
+        Lang::Pt => "Projeto",
+        Lang::Ar => "المشروع",
+        Lang::En => "Project",
+    }
+}
+
+pub fn task_summary_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "结论",
+        Lang::ZhTw => "結論",
+        Lang::Ja => "結論",
+        Lang::Ko => "결론",
+        Lang::Es => "Conclusión",
+        Lang::De => "Ergebnis",
+        Lang::Fr => "Conclusion",
+        Lang::Pt => "Conclusão",
+        Lang::Ar => "الخلاصة",
+        Lang::En => "Summary",
+    }
+}
+
+pub fn task_changes_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "改动",
+        Lang::ZhTw => "變更",
+        Lang::Ja => "変更",
+        Lang::Ko => "변경",
+        Lang::Es => "Cambios",
+        Lang::De => "Änderungen",
+        Lang::Fr => "Modifications",
+        Lang::Pt => "Alterações",
+        Lang::Ar => "التغييرات",
+        Lang::En => "Changes",
+    }
+}
+
+pub fn task_reason_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "原因",
+        Lang::ZhTw => "原因",
+        Lang::Ja => "理由",
+        Lang::Ko => "사유",
+        Lang::Es => "Motivo",
+        Lang::De => "Grund",
+        Lang::Fr => "Raison",
+        Lang::Pt => "Motivo",
+        Lang::Ar => "السبب",
+        Lang::En => "Reason",
+    }
+}
+
+pub fn task_link_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "会话",
+        Lang::ZhTw => "對話",
+        Lang::Ja => "セッション",
+        Lang::Ko => "세션",
+        Lang::Es => "Sesión",
+        Lang::De => "Sitzung",
+        Lang::Fr => "Session",
+        Lang::Pt => "Sessão",
+        Lang::Ar => "الجلسة",
+        Lang::En => "Session",
+    }
+}

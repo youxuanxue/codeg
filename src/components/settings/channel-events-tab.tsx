@@ -60,6 +60,11 @@ const ALL_EVENT_TYPES = [
     labelKey: "questionRequest",
     descKey: "questionRequestDesc",
   },
+  {
+    id: "task_attention",
+    labelKey: "taskAttention",
+    descKey: "taskAttentionDesc",
+  },
 ] as const
 
 const ALL_IDS = ALL_EVENT_TYPES.map((e) => e.id)

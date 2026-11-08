@@ -4590,6 +4590,8 @@
       "permissionRequestDesc": "에이전트가 작업 권한을 요청할 때",
       "questionRequest": "에이전트 질문",
       "questionRequestDesc": "에이전트가 질문할 때",
+      "taskAttention": "작업 확인 필요",
+      "taskAttentionDesc": "작업이 검토 대기 상태가 되거나 실패했을 때",
       "userPromptSent": "사용자 메시지",
       "userPromptSentDesc": "메시지를 보낼 때 — 알림에 메시지 내용이 포함됩니다",
       "topLevelOnly": "최상위 세션만",

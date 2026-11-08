@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -22,6 +22,7 @@ use crate::db::service::{
 };
 use crate::logging::throttle::{LagLogThrottle, LAG_LOG_WINDOW};
 use crate::models::agent::AgentType;
+use crate::web::event_bridge::{WebEventBroadcaster, WORK_TASK_CHANGED_EVENT};
 
 /// Minimum interval between pushes for the same event type per channel (debounce).
 const DEBOUNCE_SECS: u64 = 5;
@@ -448,6 +449,167 @@ pub fn spawn_event_subscriber(
             .await;
         }
     })
+}
+
+/// The event id a work task's push is filtered under, in the same allow-list
+/// as the ACP events (`chat_event_filter`, per-channel `event_filter_json`).
+pub const TASK_ATTENTION_EVENT: &str = "task_attention";
+
+/// Push a chat message when a work task comes to need the user: it entered
+/// review or failed. Runs beside [`spawn_event_subscriber`] on the JSON
+/// broadcaster, where the task engine announces every change as an id-only
+/// `task://changed` upsert.
+///
+/// An upsert says only that the row changed, and a review task is upserted
+/// again for every edit, delivery attempt or archive. So a push is keyed by
+/// `(task id, settled_at)`: `settled_at` is stamped exactly when a task enters
+/// review or failed, so each settle pushes once however often the row is
+/// upserted afterwards, and a retried run that settles again pushes again.
+pub fn spawn_task_attention_subscriber(
+    broadcaster: Arc<WebEventBroadcaster>,
+    manager: ChatChannelManager,
+    db_conn: DatabaseConnection,
+) -> JoinHandle<()> {
+    // Subscribe before the spawn, like the ACP subscriber above.
+    let mut rx = broadcaster.subscribe();
+    tokio::spawn(async move {
+        let mut config = EventConfigCache::new();
+        let mut pushed: HashMap<i32, chrono::DateTime<chrono::Utc>> = HashMap::new();
+        let webhook_client = super::webhook::make_webhook_client();
+        loop {
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                // A missed upsert is a missed push for that settle; the task
+                // itself is unaffected and its next settle pushes normally.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("[ChatChannel] task subscriber lagged: dropped {n} events");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+            if event.channel != WORK_TASK_CHANGED_EVENT {
+                continue;
+            }
+            if event.payload.get("kind").and_then(|v| v.as_str()) != Some("upsert") {
+                continue;
+            }
+            let Some(task_id) = event
+                .payload
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok())
+            else {
+                continue;
+            };
+            config.refresh_if_needed(&db_conn).await;
+            process_task_change(
+                task_id,
+                &manager,
+                &db_conn,
+                &config,
+                &mut pushed,
+                &webhook_client,
+            )
+            .await;
+        }
+    })
+}
+
+/// One `task://changed` upsert: push when the task newly settled into review
+/// or failed, through the same global filter, per-channel filter and webhook
+/// fan-out as the ACP events. Not debounced: each settle is its own decision.
+async fn process_task_change(
+    task_id: i32,
+    manager: &ChatChannelManager,
+    db_conn: &DatabaseConnection,
+    config: &EventConfigCache,
+    pushed: &mut HashMap<i32, chrono::DateTime<chrono::Utc>>,
+    webhook_client: &reqwest::Client,
+) {
+    use crate::db::entities::work_task::WorkTaskStatus;
+    if !config.filter_known {
+        return;
+    }
+    match &config.global_filter {
+        Some(filter) if !filter.iter().any(|e| e == TASK_ATTENTION_EVENT) => return,
+        _ => {}
+    }
+    let Ok(task) = crate::db::service::work_task_service::get_model(db_conn, task_id).await else {
+        return;
+    };
+    if !matches!(task.status, WorkTaskStatus::Review | WorkTaskStatus::Failed) {
+        // Left review/failed (retried, accepted, canceled): its next settle
+        // is a new one.
+        pushed.remove(&task_id);
+        return;
+    }
+    let Some(settled_at) = task.settled_at else {
+        return;
+    };
+    if pushed.get(&task_id) == Some(&settled_at) {
+        return;
+    }
+    // A settle from before this process started is not news: the user was
+    // told then, or the server was down and the task waits on the board.
+    if chrono::Utc::now().signed_duration_since(settled_at) > chrono::Duration::minutes(10) {
+        pushed.insert(task_id, settled_at);
+        return;
+    }
+    let project = crate::db::entities::folder::Entity::find_by_id(task.folder_id)
+        .one(db_conn)
+        .await
+        .ok()
+        .flatten()
+        .map(|f| f.name);
+    let Some(msg) =
+        message_formatter::format_task_attention(&task, project.as_deref(), config.lang)
+    else {
+        return;
+    };
+    pushed.insert(task_id, settled_at);
+
+    if !config.webhooks.is_empty() {
+        let session = SessionContext {
+            conversation_id: task.conversation_id,
+            ..SessionContext::default()
+        };
+        let payload = super::webhook::build_webhook_payload(
+            TASK_ATTENTION_EVENT,
+            task.connection_id.as_deref().unwrap_or(""),
+            &msg,
+            &session,
+        );
+        super::webhook::spawn_webhook_delivery(
+            webhook_client.clone(),
+            config.webhooks.clone(),
+            payload,
+        );
+    }
+
+    for ch in &config.enabled_channels {
+        if let Some(filter_json) = &ch.event_filter_json {
+            if let Ok(filter) = serde_json::from_str::<Vec<String>>(filter_json) {
+                if !filter.iter().any(|e| e == TASK_ATTENTION_EVENT) {
+                    continue;
+                }
+            }
+        }
+        let send_result = manager.send_to_channel(ch.id, &msg).await;
+        let (status, error_detail) = match &send_result {
+            Ok(_) => ("sent", None),
+            Err(e) => ("failed", Some(e.to_string())),
+        };
+        let _ = chat_channel_message_log_service::create_log(
+            db_conn,
+            ch.id,
+            "outbound",
+            "event_push",
+            &msg.to_plain_text(),
+            status,
+            error_detail,
+        )
+        .await;
+    }
 }
 
 /// Handle a single bus envelope: map it to a chat-channel push, apply the
@@ -2686,5 +2848,279 @@ mod permission_push_tests {
             .unwrap();
         config.refresh_with_epoch(&db.conn, 3).await;
         assert!(!config.top_level_only);
+    }
+}
+
+#[cfg(test)]
+mod task_attention_tests {
+    //! The work-task push: a task that settles into review or failed is pushed
+    //! once per settle, honours the global and per-channel filters, and stays
+    //! quiet for every other status and for settles older than this process.
+    use super::*;
+    use crate::chat_channel::error::ChatChannelError;
+    use crate::chat_channel::traits::ChatChannelBackend;
+    use crate::chat_channel::types::{
+        ChannelConnectionStatus, ChannelType, IncomingCommand, SentMessageId,
+    };
+    use crate::db::entities::work_task::{self, WorkTaskStatus};
+    use crate::db::service::work_task_service;
+    use crate::db::test_helpers;
+    use crate::models::work_task::WorkTaskDraft;
+    use async_trait::async_trait;
+    use sea_orm::{ActiveModelTrait, Set};
+    use tokio::sync::mpsc;
+
+    #[derive(Clone, Default)]
+    struct Recorder {
+        msgs: Arc<Mutex<Vec<String>>>,
+    }
+    struct RecordingBackend {
+        rec: Recorder,
+    }
+
+    #[async_trait]
+    impl ChatChannelBackend for RecordingBackend {
+        fn channel_type(&self) -> ChannelType {
+            ChannelType::Telegram
+        }
+        async fn start(&self, _tx: mpsc::Sender<IncomingCommand>) -> Result<(), ChatChannelError> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<(), ChatChannelError> {
+            Ok(())
+        }
+        async fn status(&self) -> ChannelConnectionStatus {
+            ChannelConnectionStatus::Connected
+        }
+        async fn send_message(&self, text: &str) -> Result<SentMessageId, ChatChannelError> {
+            self.rec.msgs.lock().await.push(text.to_string());
+            Ok(SentMessageId("1".into()))
+        }
+        async fn send_rich_message(
+            &self,
+            message: &RichMessage,
+        ) -> Result<SentMessageId, ChatChannelError> {
+            self.rec.msgs.lock().await.push(message.to_plain_text());
+            Ok(SentMessageId("1".into()))
+        }
+        async fn test_connection(&self) -> Result<(), ChatChannelError> {
+            Ok(())
+        }
+    }
+
+    async fn manager_with_recorder(channel_id: i32) -> (ChatChannelManager, Recorder) {
+        let chat = ChatChannelManager::new();
+        let rec = Recorder::default();
+        chat.add_channel(
+            channel_id,
+            "test".into(),
+            ChannelType::Telegram,
+            Box::new(RecordingBackend { rec: rec.clone() }),
+        )
+        .await
+        .unwrap();
+        (chat, rec)
+    }
+
+    fn config(
+        channel_id: i32,
+        global: Option<Vec<&str>>,
+        channel: Option<&str>,
+    ) -> EventConfigCache {
+        EventConfigCache {
+            lang: Lang::En,
+            global_filter: global.map(|v| v.into_iter().map(str::to_string).collect()),
+            filter_known: true,
+            enabled_channels: vec![CachedChannel {
+                id: channel_id,
+                event_filter_json: channel.map(str::to_string),
+            }],
+            webhooks: Vec::new(),
+            top_level_only: false,
+            last_refresh: Some(Instant::now()),
+            last_epoch: 0,
+        }
+    }
+
+    /// A task in `status`, settled `ago` before now, with a summary.
+    async fn task_in(
+        db: &crate::db::AppDatabase,
+        status: WorkTaskStatus,
+        ago: chrono::Duration,
+    ) -> i32 {
+        let folder_id = test_helpers::seed_folder(db, "/tmp/task-attention").await;
+        let info = work_task_service::create(
+            &db.conn,
+            WorkTaskDraft {
+                folder_id,
+                title: "fix login".into(),
+                config: serde_json::json!({
+                    "display_text": "do it",
+                    "prompt_blocks": [{ "type": "text", "text": "do it" }],
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        let row = work_task_service::get_model(&db.conn, info.id)
+            .await
+            .unwrap();
+        let mut active: work_task::ActiveModel = row.into();
+        active.status = Set(status);
+        active.settled_at = Set(Some(chrono::Utc::now() - ago));
+        active.result_summary = Set(Some("Login fixed; needs a look at the retry".into()));
+        active.last_error = Set(Some("agent exited with code 1".into()));
+        active.update(&db.conn).await.unwrap();
+        info.id
+    }
+
+    async fn run(
+        task_id: i32,
+        chat: &ChatChannelManager,
+        db: &crate::db::AppDatabase,
+        config: &EventConfigCache,
+        pushed: &mut HashMap<i32, chrono::DateTime<chrono::Utc>>,
+    ) {
+        process_task_change(
+            task_id,
+            chat,
+            &db.conn,
+            config,
+            pushed,
+            &reqwest::Client::new(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn review_is_pushed_once_with_its_summary() {
+        let db = test_helpers::fresh_in_memory_db().await;
+        let (chat, rec) = manager_with_recorder(7).await;
+        let cfg = config(7, None, None);
+        let mut pushed = HashMap::new();
+        let id = task_in(&db, WorkTaskStatus::Review, chrono::Duration::seconds(1)).await;
+
+        run(id, &chat, &db, &cfg, &mut pushed).await;
+        // The same settle upserted again (an edit, an archive): no second push.
+        run(id, &chat, &db, &cfg, &mut pushed).await;
+
+        let msgs = rec.msgs.lock().await.clone();
+        assert_eq!(msgs.len(), 1, "got {msgs:?}");
+        assert!(
+            msgs[0].contains("Task Ready for Review"),
+            "got {:?}",
+            msgs[0]
+        );
+        assert!(msgs[0].contains("fix login"), "got {:?}", msgs[0]);
+        assert!(
+            msgs[0].contains("needs a look at the retry"),
+            "got {:?}",
+            msgs[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_is_pushed_with_its_reason() {
+        let db = test_helpers::fresh_in_memory_db().await;
+        let (chat, rec) = manager_with_recorder(7).await;
+        let mut pushed = HashMap::new();
+        let id = task_in(&db, WorkTaskStatus::Failed, chrono::Duration::seconds(1)).await;
+
+        run(id, &chat, &db, &config(7, None, None), &mut pushed).await;
+
+        let msgs = rec.msgs.lock().await.clone();
+        assert_eq!(msgs.len(), 1, "got {msgs:?}");
+        assert!(msgs[0].contains("Task Failed"), "got {:?}", msgs[0]);
+        assert!(
+            msgs[0].contains("agent exited with code 1"),
+            "got {:?}",
+            msgs[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_settle_after_a_retry_pushes_again() {
+        let db = test_helpers::fresh_in_memory_db().await;
+        let (chat, rec) = manager_with_recorder(7).await;
+        let cfg = config(7, None, None);
+        let mut pushed = HashMap::new();
+        let id = task_in(&db, WorkTaskStatus::Failed, chrono::Duration::seconds(5)).await;
+        run(id, &chat, &db, &cfg, &mut pushed).await;
+
+        let row = work_task_service::get_model(&db.conn, id).await.unwrap();
+        let mut active: work_task::ActiveModel = row.into();
+        active.status = Set(WorkTaskStatus::Review);
+        active.settled_at = Set(Some(chrono::Utc::now()));
+        active.update(&db.conn).await.unwrap();
+        run(id, &chat, &db, &cfg, &mut pushed).await;
+
+        assert_eq!(rec.msgs.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn other_statuses_and_old_settles_are_quiet() {
+        let db = test_helpers::fresh_in_memory_db().await;
+        let (chat, rec) = manager_with_recorder(7).await;
+        let cfg = config(7, None, None);
+        let mut pushed = HashMap::new();
+        for status in [
+            WorkTaskStatus::Running,
+            WorkTaskStatus::Done,
+            WorkTaskStatus::Canceled,
+        ] {
+            let id = task_in(&db, status, chrono::Duration::seconds(1)).await;
+            run(id, &chat, &db, &cfg, &mut pushed).await;
+        }
+        let stale = task_in(&db, WorkTaskStatus::Review, chrono::Duration::hours(2)).await;
+        run(stale, &chat, &db, &cfg, &mut pushed).await;
+
+        assert!(rec.msgs.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn global_and_channel_filters_gate_the_push() {
+        let db = test_helpers::fresh_in_memory_db().await;
+        let id = task_in(&db, WorkTaskStatus::Review, chrono::Duration::seconds(1)).await;
+
+        // An explicit global list without the event: nothing.
+        let (chat, rec) = manager_with_recorder(7).await;
+        run(
+            id,
+            &chat,
+            &db,
+            &config(7, Some(vec!["error"]), None),
+            &mut HashMap::new(),
+        )
+        .await;
+        assert!(rec.msgs.lock().await.is_empty());
+
+        // Allowed globally, but this channel's own list leaves it out.
+        let (chat, rec) = manager_with_recorder(7).await;
+        let cfg = config(7, Some(vec![TASK_ATTENTION_EVENT]), Some(r#"["error"]"#));
+        run(id, &chat, &db, &cfg, &mut HashMap::new()).await;
+        assert!(rec.msgs.lock().await.is_empty());
+
+        // Both lists name it.
+        let (chat, rec) = manager_with_recorder(7).await;
+        let cfg = config(
+            7,
+            Some(vec![TASK_ATTENTION_EVENT]),
+            Some(r#"["task_attention"]"#),
+        );
+        run(id, &chat, &db, &cfg, &mut HashMap::new()).await;
+        assert_eq!(rec.msgs.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_filter_fails_closed() {
+        let db = test_helpers::fresh_in_memory_db().await;
+        let (chat, rec) = manager_with_recorder(7).await;
+        let id = task_in(&db, WorkTaskStatus::Review, chrono::Duration::seconds(1)).await;
+        let mut cfg = config(7, None, None);
+        cfg.filter_known = false;
+
+        run(id, &chat, &db, &cfg, &mut HashMap::new()).await;
+
+        assert!(rec.msgs.lock().await.is_empty());
     }
 }
