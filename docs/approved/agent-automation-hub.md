@@ -108,7 +108,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 - 反向隔离：事件 key 调用任何管理 API 必须返回 401。这条写进验收。
 - 每个路由组有自己的请求体上限（`/events` 16 KB，`/tell` 24 KB）和按 key 的限流（默认每个 key 每分钟 60 次，超出返回 429，生产方按原 `id` 重试即可）。
 - key 只存哈希值；日志和任务记录里不出现 key 原文。
-- **key 管理（P0 范围）**：新增管理接口（受 `CODEG_TOKEN` 保护）：创建来源（key 只在创建时显示一次）、列出、轮换、吊销。命令行入口放在 `codeg-cli` 的 `hub` 子命令下（`codeg-cli hub source create|list|rotate|revoke`），它连接已运行的 Codeg，所以依赖上述管理接口。来源名不得以 `forge:` 开头（保留给 Forge 自己）。另有 `codeg-cli hub check <配置目录>`，**离线**校验 `rules.json` 和 `projects.json`，不需要运行实例，既给热加载用，也给配置仓库的 CI 用。
+- **key 管理（P0 范围）**：新增管理接口（受 `CODEG_TOKEN` 保护）：创建来源（key 只在创建时显示一次）、列出、轮换、吊销。命令行入口放在 `codeg-cli` 的 `hub` 子命令下（`codeg-cli hub source create|list|rotate|revoke`），它连接已运行的 Codeg，所以依赖上述管理接口。来源名只允许 `[a-z0-9-]`，长度 1 到 64：它是来源键 `hub:<source>:<subject>` 的一段，不能含 `:`，否则不同的来源和 subject 可能拼出同一个键。另有 `codeg-cli hub check <配置目录>`，**离线**校验 `rules.json` 和 `projects.json`，不需要运行实例，既给热加载用，也给配置仓库的 CI 用。
 
 ### 监听
 
@@ -150,7 +150,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 - 出口 IP / 启动器（cc0、codex0）：我没有核实 `build_runtime_env_for_agent` 能否按规则选择启动器，所以 P0 的规则里不提供 `launcher` 字段，沿用 codeg 的 Agent 全局运行环境设置。能否按规则选择，列入待核实项。
 - 项目的通知一律带项目名：卡片标题以 `[sub2api]` 开头，任务记录里也带 `project`，方便在总览里按项目筛。
 - 总览群收三类消息：每日跨项目汇总、Watchdog 告警、找不到项目的 `unrouted` 事件摘要。
-- **渠道约束（已读代码）**：codeg 的 Lark 渠道一个实例只绑定一个 `chat_id`（`chat_channel/backends/lark.rs:150`），发送时用的也是这个值（第 233 行），不看消息目标里的 `chat_id`。按 D10，P0 改发送路径：`target.chat_id` 有值时用它，否则用渠道默认群；机器人不在目标群里时发送失败，错误计入 `hub_tell` 并向总览群报告。需要为这条改动补测试：有 `target.chat_id` 时请求的 `receive_id` 是它；没有时是默认群；平台返回「机器人不在群里」类错误时不静默吞掉。
+- **渠道约束（已读代码）**：codeg 的 Lark 渠道一个实例只绑定一个 `chat_id`（`chat_channel/backends/lark.rs` 的 `LarkBackend::new`），发送时用的也是这个值（`send_lark_message`），不看消息目标里的 `chat_id`。按 D10，P0 改发送路径：`target.chat_id` 有值时用它，否则用渠道默认群；机器人不在目标群里时发送失败，错误计入 `hub_tell` 并向总览群报告。需要为这条改动补测试：有 `target.chat_id` 时请求的 `receive_id` 是它；没有时是默认群；平台返回「机器人不在群里」类错误时不静默吞掉。
 - **入站（P2）的约束**：入站消息按事件里的 `chat_id` 映射到项目，所以同一个飞书应用只应开一条长连接，不能每个群一条。我没有核对飞书对「同一应用多条长连接」的投递规则（可能只随机投给其中一条），实现前要先查官方文档，核实之前按「一个应用一条连接」设计。
 
 ## 路由规则 `rules.json`
@@ -168,6 +168,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
       "mode": "auto",
       "when": { "source": "dev-rules-watch", "types": ["dev-rules.main.updated"] },
       "to": { "agent": "claude" },
+      "acp": { "mode_id": "<实测后确定>" },
       "project": "zhifu",
       "skill": "dev-rules-fanout",
       "ask": "dev-rules 的 main 更新到 {{id}}。只处理当前这个项目：更新它的 dev-rules submodule，同步 .cursor/rules，提交到任务分支。不要 push，也不要开 PR。",
@@ -187,7 +188,7 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 | `mode` | 否，默认 `observe` | `off`：不匹配；`observe`：命中后只记录「本来会做什么」，不创建任务、不执行；`auto`：执行 |
 | `when` | 是 | `source` 精确匹配，`types` 取其一；可选 `subject_prefix` |
 | `to` | 是 | `agent`：codeg 里已配置的 Agent 类型，对应任务配置的 `agent_type`。P0 只允许 `claude`（原因见 D5） |
-| `acp` | 否 | 与 `WorkTaskConfig` 的 `mode_id`、`config_values` 同形，用来选权限模式、模型、推理深度等；省略则继承该文件夹的设置。模型和推理深度对应哪些 `config_values` 键因 Agent 而异，实现前以 ACP 返回的选项为准 |
+| `acp` | 否 | 与 `WorkTaskConfig` 的 `mode_id`、`config_values` 同形，用来选权限模式、模型、推理深度等；省略则继承该文件夹的设置，但 `mode: auto` 的规则必须写 `mode_id`（见「执行」的限制手段第 1 条）。模型和推理深度对应哪些 `config_values` 键因 Agent 而异，实现前以 ACP 返回的选项为准 |
 | `project` / `cwd` / `worktree` | `project` 与 `cwd` 二选一 | `project` 引用项目注册表（推荐），同时决定通知发到哪个群；`cwd` 直接写路径，通知发到总览群。`worktree` 取 `wtree`（默认，由 wtree.py 新建）或 `none`（只读任务，直接在目录里执行） |
 | `skill` / `ask` | 是 | 要用的 skill 和一句指令。`ask` 只能引用 `{{id}}`、`{{type}}`、`{{subject}}`，这三个字段的字符集受限（`[A-Za-z0-9#._:/@-]`），不能带注入文本。`summary`、`detail`、`link`、`meta` 一律不进指令，放进 hub 信封单独附上 |
 | `group` / `parallel` | 否 | 并发组（默认等于 `name`）和组内上限（默认 `1`）。同一个 `subject` 同时只跑一轮；运行中又来同 subject 的事件时，合并成「结束后再跑一次」，思路与 `forge/auto` 的 `rerun` 一致，但事件带载荷，所以补充规定：补跑只用**最新一个**事件的载荷；被合并的事件状态记 `coalesced`，并记录最终处理它的事件 id（`coalesced_into`），不再单独执行。补跑的任务完结后，这些 `coalesced` 事件的显示状态随它。dev-rules 同步场景用 sha 同时当 `id` 和 `subject`，补跑取最新 sha 即可 |
@@ -195,30 +196,31 @@ Forge 定时扫描（现有）──────────▶ work_task ◀─
 | `timeout_minutes` | 否，默认 `30` | 单个任务的最长运行时间，到点由中台取消并通过 `/tell` 报告（取消入口实现前核实）。这是 P0 唯一由中台自己执行的限制，见「执行」 |
 | `tell` | 否，默认 `needed` | `never`；`needed`（只在 Agent 报告需要决策、受阻或失败时通知）；`always` |
 
-校验失败的情形：`when.source` 以 `forge:` 开头（Forge 的 issue 和 PR 只由 Forge 自己处理，D11，避免同一件事被两套规则各建一个任务）；`to.agent` 不是 `claude`（P0）；`project` 不在注册表里；`skill` 在 agent-skills 里不存在；`ask` 引用了 `id`、`type`、`subject` 之外的字段；`name` 重名；`risk` 不在 `low`、`regular`、`high` 里。
+校验失败的情形：`when.source` 不是已登记的 hub 来源名（Forge 不经过 `/events`，没有 hub 来源，所以规则无法监听 Forge 的 issue 和 PR，D11。来源登记在数据库里，离线的 `codeg-cli hub check` 只检查名字格式，是否已登记由运行中的实例在热加载时检查）；`to.agent` 不是 `claude`（P0）；`project` 不在注册表里；`skill` 在 agent-skills 里不存在；`ask` 引用了 `id`、`type`、`subject` 之外的字段；`name` 重名；`risk` 不在 `low`、`regular`、`high` 里；`mode: auto` 的规则没有 `acp.mode_id`。
 
 P0 没有订阅：事件直接按顺序匹配规则，同一 `subject` 的并发事件走「合并成结束后再跑一次」。P1 引入订阅后，先看有没有存活的订阅（见「Thread 订阅」），已订阅的 subject 改为直通，取代合并；没有订阅的再按顺序匹配规则。匹配时只命中第一条 `enabled` 且 `mode` 不是 `off` 的规则。`mode: observe` 命中的事件状态记为 `observed`，并在记录里写明本来会用的 Agent、cwd 和 `ask`；这类事件不通知人，只在管理界面和每日汇总里出现。命中 `risk: high` 的任务，在执行前也要先推卡片等人确认。P0 没有按钮回调，这类任务只通知、不执行。
 
 ## 执行
 
-- **来源标记**：hub 创建的任务带 `source_kind = "hub_event"`，来源键为 `hub:<source>:<event id>`。来源只能由中台内部传入，不进 `WorkTaskDraft`（该类型故意不带来源字段，防止客户端伪造）。`auto_merge_candidate`（`work_task/engine.rs`）对带 `source_kind` 的任务有一条硬规则：**永远不自动合并**（判断条件是 `source_kind.is_some()`）。hub 任务沿用它，正好符合 D5。`engine.rs` 里 `source_kind` 的其他分支已逐处核对（按函数名引用，行号随代码变化）：`pr_checkout_point`、`drop_pr_fetch_refs`、`merge_task_inner`、`own_work_anchor` 只对 `forge_pr` 生效，`forge_writeback` 只对 `forge_issue` / `forge_pr` 发评论，`hub_event` 都落入默认分支，无副作用。例外是两个交付网关 `delivery_source` 和 `recovery_source`：它们只认 `forge_issue`、`forge_pr` 和无来源，其他值一律报错「a task from '…' cannot be delivered」（测试 `a_task_without_deliverable_provenance_is_refused` 锁定），所以 hub 任务现在**无法交付**，见下一条。数据库层和前端对 `source_kind` 的使用没有查。
+- **来源标记**：hub 创建的任务带 `source_kind = "hub_event"`，来源键为 `hub:<source>:<subject>`（按 Thread 而不是按事件，原因见「任务创建」）。来源只能由中台内部传入，不进 `WorkTaskDraft`（该类型故意不带来源字段，防止客户端伪造）。`auto_merge_candidate`（`work_task/engine.rs`）对带 `source_kind` 的任务有一条硬规则：**永远不自动合并**（判断条件是 `source_kind.is_some()`）。hub 任务沿用它，正好符合 D5。`engine.rs` 里 `source_kind` 的其他分支已逐处核对（按函数名引用，行号随代码变化）：`pr_checkout_point`、`drop_pr_fetch_refs`、`merge_task_inner`、`own_work_anchor` 只对 `forge_pr` 生效，`forge_writeback` 只对 `forge_issue` / `forge_pr` 发评论，`hub_event` 都落入默认分支，无副作用。例外是两个交付网关 `delivery_source` 和 `recovery_source`：它们只认 `forge_issue`、`forge_pr` 和无来源，其他值一律报错「a task from '…' cannot be delivered」（测试 `a_task_without_deliverable_provenance_is_refused` 锁定），所以 hub 任务现在**无法交付**，见下一条。数据库层和前端对 `source_kind` 的使用没有查。
   - **不走 Agent 自己 push：改用新的交付接口。** main 新增了 `TaskEngine::deliver_pr`（`work_task_deliver_pr_core`，2026-11-03 合入，commit `56749eee`）：任务完成（review）后，中台直接调它，由该接口用「host 的默认账号」push 并开 PR，PR 号记在 `work_task.delivery` 字段，任务若留在 review，下次交付会推进同一个 PR。hub 任务不用 Agent 在会话里自己跑 `git push` / `gh pr create`，省掉一处不确定性（Agent 会话里 `gh` 的登录状态、PR 标题格式），也不用中台自己维护「这个任务对应哪个 PR」的映射。调用时 `mark_done` 传 `false`：开 PR 后任务留在 review，等人在 GitHub 上合并（P0 没有卡片按钮），这一步不能把任务标记为 `done`。`delete_worktree` 跟随文件夹的清理设置。这条仍然绕不开「带 `source_kind` 的任务永远不自动合并」的硬规则：该规则看的是 `source_kind.is_some()`，与是否调用 `deliver_pr` 无关。
   - **P0 代码改动：让 `hub_event` 可交付。** `delivery_source` 和 `recovery_source` 各加一个 `hub_event` 分支，走与无来源任务相同的 `DeliverySource::Local` 路径（交付到项目 `origin`，首次交付后由 `work_task.delivery` 固定目标）。`source_kind` 仍保持非空，「永远不自动合并」不受影响。测试：`hub_event` 任务能交付到 `origin` 并记录 PR 号；交付中断后的恢复走同一目标；未知来源（例如 `automation`）仍被拒绝；`hub_event` 任务仍不是 `auto_merge_candidate`。
   - **PR 的结局回写任务（P0）。** `mark_done=false` 之后，引擎不会自己发现 PR 已合并，任务会一直停在 review，同一 subject 的补跑也就永远等不到（见「数据模型」的非终态定义）。所以中台加一个定时检查（与 Forge 扫描同间隔）：对 `source_kind = "hub_event"`、状态为 review 且 `delivery` 已记录 PR 号的任务，用 `ForgeDeliveryApi::get_pull` 查 PR 状态。已合并：调 `deliver_pr(mark_done = true)` 完结任务，PR 已在本任务的 commit 上合并时它不再 push（测试 `a_kept_task_finishes_on_its_merged_pull_request_without_pushing`）。关闭但没合并：调 `TaskEngine::cancel`，原因写「PR 被关闭」，并按 `tell` 规则通知。仍开着：不动。查询失败只记录、下一轮再查，不改任务状态。
-- **任务创建**：通过 `work_task_service::create`（内部参数传来源），任务 prompt 由 skill 加 `ask` 加 hub 信封组成。会话链接写回任务记录，方便从任务直接跳到当时的 Agent 会话。
+- **前端（已读代码）**：看板的交付判断写成 `source_kind == null`：`task-acceptance.ts` 的 `deliversIntoOpenPr` 和 `canDeliverToPr`（后者只对 Forge 任务或已读到远端的任务为真），`task-deliver-pr-dialog.tsx` 的 `firstLocal`，`task-detail-sheet.tsx` 读取项目远端的条件。`hub_event` 任务不满足这些条件，所以自动交付失败、任务回到 review 后，看板不提供交付按钮，人无法重试。P0 改动：在 `task-acceptance.ts` 加一个判断「按本地任务交付」（`source_kind` 为空或为 `hub_event`），这几处都改用它，与后端 `delivery_source` 的 `Local` 分支对应。任务时间线的「由自动处理创建」按 `auto_trigger` 显示触发方式，`AUTO_TRIGGER_KEYS`（`task-detail-sheet.tsx`）没有 `hub` 时会原样显示 `hub`，所以同时加 `hub` 的文案（10 种语言）。
+- **任务创建（已读代码）**：公开的 `work_task_service::create` 只收 `WorkTaskDraft`，不能带来源；唯一写来源列的入口是 `create_from_forge_by`。hub 直接调它（`auto_trigger` 传 `"hub"`，`force` 传 `false`）。它在同一事务里写 `work_task_source_key` 行，并在插入后检查同一来源键有没有别的活跃任务（`other_active_for_keys`，活跃的定义是 `ACTIVE_STATUSES`），有则回滚并返回 `Duplicate`。来源键取 `hub:<source>:<subject>`，这个检查就正好回答「同一 subject 是否还在跑」：返回 `Duplicate` 时事件记为 `coalesced`，hub 不另写一套判断。函数名带 forge，但不改名：它是上游代码，改名会增加每次上游合并的冲突。hub 的键以 `hub:` 开头，Forge 的键以 provider 开头，`source_keys_ever_tasked` 等 Forge 扫描用的查询不会碰到 hub 的键。任务 prompt 由 skill 加 `ask` 加 hub 信封组成。会话链接写回任务记录，方便从任务直接跳到当时的 Agent 会话。
 - **worktree（接入点已定位）**：任务 worktree 由 `TaskEngine::ensure_worktree`（`work_task/engine.rs`）创建：先记下 base 分支和 sha，再调 `git_worktree_add`（`commands/folders.rs`），分支固定为 `task/<任务 id>`，目录为 `<项目目录名>-task-<任务 id>`，放在该文件夹设置的 `worktree_root` 下；随后 `open_worktree_folder_core` 把它登记成以任务文件夹为父的 worktree 文件夹，`work_task_service::attach_worktree` 记录 `worktree_folder_id`、base 和分支。`work_task/*.rs` 和 `commands/folders.rs` 里没有任何 submodule 处理（搜索 `submodule` 无结果）。
   - **做法**：只在 `ensure_worktree` 里加一个分支：仓库有 `.gitmodules` 时，用 `wtree.py create --json --repo <根目录> --branch task/<id> --base <记录的 base_sha> <slug>` 代替 `git_worktree_add`，取返回的 `session_switch.workdir` 作为 `wt_path`，后面的登记和 `attach_worktree` 原样不动。这样分支命名和 diff 的 base 都与引擎一致。不抽象成 provider 接口，只有这一处分支。
   - **要处理的差异**：① `wtree.py` 的 `--branch`、`--base` 与默认目录规则（默认分支名取自 `../<repo>-wt-<name>` 的目录名）以 `create --help` 为准，组合起来的行为实现时实测；目录位置由 wtree 决定，与 `worktree_root` 设置要对齐或明确忽略。② 清理：引擎现有的移除路径（`recreate_worktree_from_branch`、任务删除和取消时的 worktree 移除）不认识 submodule worktree，带 submodule 的任务必须改调 `wtree.py remove --path <路径>`，所有移除点都要覆盖。③ `session-check --expected <workdir>` 在 cwd 等于 workdir 时运行，作为创建后的校验；ACP 任务的 cwd 由引擎直接设定，不依赖会话切换。
   - 这是 P0 里改动面最大的一块，先单独提 PR，再接事件入口。
 - **P0 的限制手段**（已读代码：`src-tauri/src` 里没有 `max-budget`、`allowedTools` 这类执行机制，ACP 任务可配置的只有 `mode_id` 和 `config_values`）：
-  1. `acp.mode_id` 选更严的权限模式；
+  1. `acp.mode_id` 显式指定权限模式。Claude Code 会话没有指定模式时，先用它自己的 `permissions.defaultMode`，没有才用 Auto（main 的 `503645bc`，见 `docs/cli.md`「Permissions」）。本机 `~/.claude/settings.json` 的 `defaultMode` 是 `bypassPermissions`：ACP 会话如果读取用户设置，不指定模式的 hub 任务就会以 bypass 运行。所以 `mode: auto` 的规则必须写 `acp.mode_id`，不继承文件夹设置（校验项）。取哪个值实测后定：Auto 会自己拒绝它判断为有风险的命令，经 API 网关时可能全部拒绝；
   2. 中台自己执行的 `timeout_minutes`（也是无人值守时的兜底：更严的权限模式可能让任务停在等待应答，引擎把这类请求记进未应答请求集合，任务随之进入 `awaiting_input`（`work_task/engine.rs` 模块注释），没人应答就一直等到超时；`mode_id` 的取值和无人值守行为要实测）；
   3. 并发组上限 `parallel`；
   4. 带来源的任务永远不自动合并，且不执行合并；
   5. 一个规则一个项目，任务只写自己的 worktree。
 
   **没有金额预算，也没有工具白名单**。这与 dev-rules §4 对 `claude -p` 的要求不同（那条约束的是无头调用，不是 ACP）。要强约束，需要无头运行器或脚本执行，见「待定问题」第 1 条。
-- **汇报**：不新建 `hub_report`。codeg 已有 `task_progress` 和 `task_complete`，结论为 `success`、`needs_review`、`blocked`（`acp/delegation/companion.rs:1414` 校验），引擎据此结算：`blocked` 变为失败，`success` 和 `needs_review` 进入 review。P0 只新增一个结论 `dropped`，表示查过后没有要做的事，任务静默结束，不通知人。落点与改动（三处）：① `acp/delegation/companion.rs:1414` 的校验和错误文案增加 `dropped`；② `work_task` 迁移和实体里列出结论值的注释同步；③ 引擎结算（`engine.rs` 约 3165 行）把 `dropped` 当作 review 处理，并在 `tell` 策略里跳过通知，然后由中台调用现有的 `complete_without_merge`（`work_task_service.rs`，review → done，引擎会拿 git 重新核对「没有改动」）自动完结并清理 worktree。若 Agent 报了 `dropped` 但 worktree 里有改动，不自动完结，按普通 review 通知，避免静默丢弃工作。对应关系：
+- **汇报**：不新建 `hub_report`。codeg 已有 `task_progress` 和 `task_complete`，结论为 `success`、`needs_review`、`blocked`（`acp/delegation/companion.rs` 的 `build_tools_call_spawn` 校验），引擎据此结算：`blocked` 变为失败，`success` 和 `needs_review` 进入 review。P0 只新增一个结论 `dropped`，表示查过后没有要做的事，任务静默结束，不通知人。落点与改动（三处）：① `build_tools_call_spawn` 的校验和错误文案增加 `dropped`；② `work_task` 迁移和实体里列出结论值的注释同步；③ 引擎结算（`work_task/engine.rs` 的 `on_turn_complete`）把 `dropped` 当作 review 处理，并在 `tell` 策略里跳过通知，然后由中台调用现有的 `complete_without_merge`（`work_task_service.rs`，review → done，引擎会拿 git 重新核对「没有改动」）自动完结并清理 worktree。若 Agent 报了 `dropped` 但 worktree 里有改动，不自动完结，按普通 review 通知，避免静默丢弃工作。对应关系：
 
   | 要表达的 | 现有机制 |
   | --- | --- |
@@ -244,7 +246,7 @@ P0 没有订阅：事件直接按顺序匹配规则，同一 `subject` 的并发
 - `hub_source`：`id`、`name`、`key_hash`、`project`（可空，绑定后该来源只能向此项目的群发消息）、`enabled`、`created_at`、`revoked_at`。
 - `hub_event`：`id`、`source_id`、`event_id`、`type`、`subject`、`summary`、`detail`、`link`、`meta`、`received_at`、`disposition`（只存路由时刻就确定的结果：P0 为 `unrouted`、`observed`、`routed`、`coalesced`；P1 增加 `delivered`、`delivery_failed`）、`coalesced_into`（可空）、`rule_name`、`work_task_id`。唯一约束 `(source_id, event_id)`。
   - **事件的处理进度不单独存**：`routed` 事件的显示状态由其 `work_task` 的状态派生，管理界面和每日汇总都读这个派生值，避免两处手动同步。映射：`todo` / `queued` / `preparing` 显示为 queued；`running` 显示为 running；`awaiting_input` 显示为 needs_decision；`review` 显示为 needs_review（等人审，按 `tell` 规则通知）；`done` 显示为 done（含 `dropped` 自动完结）；`failed` 显示为 failed；`canceled` 显示为 canceled（人取消、超时取消或 PR 被关闭，原因取自任务时间线）；`merging` 显示为 delivering：hub 任务不走引擎的本地合并，但 `deliver_pr` 交付期间任务短暂处于 `merging`。
-  - 并发合并和 Watchdog 的判断都读派生状态：「同一 subject 是否还在跑」等价于「是否存在非终态（`todo`、`queued`、`preparing`、`running`、`awaiting_input`、`review`、`merging`）的关联任务」。已交付的任务在 PR 合并或关闭后，由「PR 的结局回写任务」离开 review，补跑才会开始。
+  - 「同一 subject 是否还在跑」由创建任务时的来源键检查回答（见「任务创建」），活跃状态只在 `work_task_service::ACTIVE_STATUSES` 定义一次（含 `review` 和 `merging`），hub 不另列。Watchdog 读同一个定义。已交付的任务在 PR 合并或关闭后，由「PR 的结局回写任务」离开 review，补跑才会开始。
 - `hub_subscription`：`work_task_id`、`source_id`、`subject`、`context_only`（只提供上下文，不带授权，也不唤醒已结束的任务）、`created_at`、`dropped_at`。唯一约束 `(work_task_id, source_id, subject)`。
 - `hub_tell`：`source_id`、`project`（可空，空表示总览群）、`key`、`text`、`last_sent_at`、`message_id`。唯一约束 `(source_id, project, key)`。
 
@@ -301,9 +303,12 @@ P0 没有订阅：事件直接按顺序匹配规则，同一 `subject` 的并发
   - 超长或非法字段返回 422/413，不落库。
   - 规则匹配按顺序取第一条；没有匹配的记为 `unrouted`。
   - 并发组：同一 subject 运行中又来事件时合并成一次补跑；组内上限生效。
-  - 规则文件校验失败（`project` 不存在、`ask` 引用了 `summary`、`when.source` 以 `forge:` 开头、`name` 重名）时，继续使用旧规则，并向总览群报错。
+  - 规则文件校验失败（`project` 不存在、`ask` 引用了 `summary`、`when.source` 不是已登记的来源、`name` 重名）时，继续使用旧规则，并向总览群报错。
   - `ask` 里出现 `{{summary}}` 被拒绝；事件的 `summary` 带「忽略以上指令」之类文本时，只出现在信封里，不进指令。
   - hub 任务永远不会自动合并（`source_kind` 非空）。
+  - 同一 subject 已有活跃任务时，`create_from_forge_by` 返回 `Duplicate`，事件记为 `coalesced`，不新建任务；来源名含 `:` 时创建来源被拒绝。
+  - `mode: auto` 的规则缺 `acp.mode_id` 时校验失败；hub 任务的会话以规则指定的模式启动（实测，读会话的当前模式）。
+  - 前端：「按本地任务交付」的判断对无来源和 `hub_event` 为真，对 `forge_issue`、`forge_pr` 为假（vitest）。
   - 交付：`hub_event` 任务经 `deliver_pr(mark_done = false)` 开 PR 到项目 `origin`，任务留在 review 并记录 PR 号；未知来源仍被拒绝。
   - PR 结局回写：PR 合并后任务变为 done，且不再 push；PR 关闭未合并时任务变为 canceled 并通知；查询失败时任务状态不变。之后同一 subject 的 `coalesced` 事件才开始补跑。
   - 任务进入 `awaiting_input` 时立刻通知，通知里带问题内容；超过 `timeout_minutes` 仍无人应答才取消。
@@ -326,7 +331,7 @@ P0 没有订阅：事件直接按顺序匹配规则，同一 `subject` 的并发
   - 保留期：超期的 `observed` 事件被清理，关联了任务的事件不被清理。
 - 实机验证：在 dev-rules 推一个只改文档的 commit，2 分钟内看到分发 PR 开到已登记的项目，飞书收到一条通知；把同一个 sha 再投递一次，不产生第二个任务；在 GitHub 上合并这个 PR 后，任务在一个扫描间隔内变为 done。
 - 监听检查：`lsof -iTCP -sTCP:LISTEN` 显示 codeg 只监听 tailnet 地址，没有 `0.0.0.0` 或 `*`；从 tailnet 之外的设备访问不通。
-- P0 不新增 UI，因此不需要 Playwright e2e；P2 加看板时再补。
+- P0 不新增页面，但改了现有交付入口对 hub 任务的显示，所以补一条 Playwright e2e：一个处于 review、自动交付失败的 hub 任务，详情里出现交付按钮，对话框显示项目的 `origin`。看板页面在 P2，届时再补。
 
 ## 风险与回滚
 
@@ -342,11 +347,11 @@ P0 没有订阅：事件直接按顺序匹配规则，同一 `subject` 的并发
 3. zhifu 专属飞书群的群 id（建群后提供）；sub2api、ai4s 何时接入。
 4. 路由规则放私有仓库 `agent-hub-config`（D12，已建）。该仓库里现有的 `projects.json` 还带着已移除的 `launcher` 字段，下一次提交配置时一并去掉。
 
-**已核实（2026-11-03，读代码）**：`add_folder` 按路径幂等；取消入口是 `TaskEngine::cancel(task_id, reason)`（`work_task/engine.rs`），`merging` 状态不能取消，worktree 保留，移除是另一个调用；`engine.rs` 里 `source_kind` 的其他分支对 `hub_event` 无副作用，交付网关除外（见「执行」，数据库层和前端未查）；任务 worktree 的创建点是 `ensure_worktree`。
+**已核实（2026-11-03，读代码；2026-11-08 对照 main `b8483dde` 复核）**：`add_folder` 按路径幂等；取消入口是 `TaskEngine::cancel(task_id, reason)`（`work_task/engine.rs`），`merging` 状态不能取消，worktree 保留，移除是另一个调用；`engine.rs` 里 `source_kind` 的其他分支对 `hub_event` 无副作用，交付网关除外；数据库层的来源只由 `create_from_forge_by` 写入，前端的交付判断需要改（均见「执行」）；任务 worktree 的创建点是 `ensure_worktree`。
 
 **实现前仍需核实**：
-- codeg 经 ACP 启动的 Claude 会话是否加载 `~/.claude/settings.json` 的 hook（决定 `gh-pr-guard` 对 hub 任务是否生效）。
-- `mode_id` 的取值，以及无人值守时任务是否会停在等待应答。
+- codeg 经 ACP 启动的 Claude 会话是否读取 `~/.claude/settings.json`：决定 `gh-pr-guard` 对 hub 任务是否生效，也决定不指定 `mode_id` 时是否落到 `bypassPermissions`。
+- `mode_id` 取哪个值，以及在这个模式下无人值守的任务是否会停在等待应答。
 - `wtree.py create` 同时给 `--branch` 和 `--base` 的行为，以及目录位置与 `worktree_root` 的关系。
 - 引擎里所有 worktree 移除点，逐个改为认识 submodule worktree。
 - `deliver_pr` 所用的 host 默认账号（`ForgeDeliveryApi::local_target`）能否 push 到 zhifu 这个私有仓库并开 PR。
