@@ -1246,6 +1246,10 @@ pub fn build_router_with_proxy_auth(
             post(handlers::acp::acp_list_agent_skills),
         )
         .route(
+            "/acp_list_agent_runtime_skills",
+            post(handlers::acp::acp_list_agent_runtime_skills),
+        )
+        .route(
             "/acp_read_agent_skill",
             post(handlers::acp::acp_read_agent_skill),
         )
@@ -1879,6 +1883,10 @@ pub fn build_router_with_proxy_auth(
         .route(
             "/work_task_create_from_forge",
             post(handlers::forge::work_task_create_from_forge),
+        )
+        .route(
+            "/work_task_create_from_forge_issues",
+            post(handlers::forge::work_task_create_from_forge_issues),
         )
         .route(
             "/work_task_lookup_by_source",

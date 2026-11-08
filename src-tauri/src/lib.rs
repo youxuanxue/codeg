@@ -15,6 +15,7 @@
 
 pub mod acp;
 pub mod acp_transcript;
+pub mod agent_turn_files;
 pub use acp::{
     idle_sweep_task, idle_timeout_from_env, lifecycle_subscriber_task, SWEEP_INTERVAL_SECS,
 };
@@ -2207,6 +2208,7 @@ mod tauri_app {
                 crate::commands::custom_agents::acp_add_registry_agent,
                 crate::commands::custom_agents::acp_current_platform,
                 acp_commands::acp_list_agent_skills,
+                acp_commands::acp_list_agent_runtime_skills,
                 acp_commands::acp_read_agent_skill,
                 acp_commands::acp_save_agent_skill,
                 acp_commands::acp_delete_agent_skill,
@@ -2345,6 +2347,7 @@ mod tauri_app {
                 forge_commands::forge_merge_options,
                 forge_commands::forge_merge_change,
                 forge_commands::work_task_create_from_forge,
+                forge_commands::work_task_create_from_forge_issues,
                 forge_commands::work_task_lookup_by_source,
                 forge_commands::forge_settings_get,
                 forge_commands::forge_settings_set,
