@@ -2145,7 +2145,7 @@ mod permission_push_tests {
         assert_eq!(
             sent(&rec).await.len(),
             1,
-            "a bridged question must still notify (no IM answer flow to defer to)"
+            "a bridged question must still notify: the push is how chat answers it"
         );
     }
 

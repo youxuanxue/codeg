@@ -7,9 +7,11 @@
 //! answers two questions at once.
 //!
 //! The link between a sent push and the question it asked lives in memory
-//! only: a restart forgets it, and a reply to an older push is told to answer
-//! in Codeg. Pushes are few (one per question the user is actually asked), so
-//! the map is small; it is still bounded.
+//! only. After a restart a reply to an older push is no longer recognized as
+//! an answer, and a group reply that mentions no one is dropped like any other
+//! group chatter; the question is still waiting in Codeg. Pushes are few (one
+//! per question the user is actually asked), so the map is small; it is still
+//! bounded.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
