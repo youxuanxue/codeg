@@ -80,6 +80,15 @@ pub fn spawn_command_dispatcher(
         let mut config = CommandConfigCache::new();
 
         while let Some(cmd) = command_rx.recv().await {
+            // A group reply that does not mention the bot is let through only
+            // in case it answers a question push. Any other one is people
+            // talking to each other: dropped before it is logged, as a
+            // mention-less group message always was.
+            if super::question_reply::is_unaddressed_group_reply(&cmd)
+                && !super::question_reply::replies_to_tracked_question(&cmd).await
+            {
+                continue;
+            }
             let text = cmd.command_text.trim();
             tracing::info!(
                 "[ChatChannel] received command from channel={} sender={}: {:?}",
@@ -101,6 +110,23 @@ pub fn spawn_command_dispatcher(
             .await;
 
             config.refresh_if_needed(&db_conn).await;
+
+            // A reply to an agent's question push answers it; nothing else
+            // about the message matters.
+            if let Some(reply) =
+                super::question_reply::answer_reply(&cmd, &conn_mgr, config.lang).await
+            {
+                send_dispatch_message(
+                    &db_conn,
+                    &manager,
+                    cmd.channel_id,
+                    text,
+                    DispatchMessage::Rich(reply),
+                    cmd.target.clone(),
+                )
+                .await;
+                continue;
+            }
 
             let response = dispatch_command(
                 text,

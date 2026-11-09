@@ -237,6 +237,21 @@ pub fn question_request_title(lang: Lang) -> &'static str {
     }
 }
 
+pub fn question_request_reply_body(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "智能体正在向你提问。直接回复这条消息作答，回「跳过」让它自己判断。",
+        Lang::ZhTw => "智慧代理正在向你提問。直接回覆這則訊息作答，回「跳過」讓它自行判斷。",
+        Lang::Ja => "エージェントが質問しています。このメッセージに返信して回答してください（「skip」で判断を任せます）。",
+        Lang::Ko => "에이전트가 질문하고 있습니다. 이 메시지에 답장해 답하세요 (\"skip\"이면 에이전트가 판단).",
+        Lang::Es => "Un agente te hace una pregunta. Responde a este mensaje (\"skip\" para que decida él).",
+        Lang::De => "Ein Agent stellt eine Frage. Antworte auf diese Nachricht (\"skip\" lässt ihn entscheiden).",
+        Lang::Fr => "Un agent vous pose une question. Répondez à ce message (\"skip\" pour le laisser décider).",
+        Lang::Pt => "Um agente está fazendo uma pergunta. Responda a esta mensagem (\"skip\" para ele decidir).",
+        Lang::Ar => "يطرح أحد الوكلاء سؤالاً. أجب بالرد على هذه الرسالة (\"skip\" ليقرر بنفسه).",
+        Lang::En => "An agent is asking a question. Reply to this message to answer (\"skip\" lets it decide).",
+    }
+}
+
 pub fn question_request_body(lang: Lang) -> &'static str {
     match lang {
         Lang::ZhCn => "智能体正在向你提问，请在 Codeg 中回答。",
@@ -1742,5 +1757,67 @@ pub fn task_link_label(lang: Lang) -> &'static str {
         Lang::Pt => "Sessão",
         Lang::Ar => "الجلسة",
         Lang::En => "Session",
+    }
+}
+
+// Answering an agent question by replying to its push
+
+pub fn question_reply_sent(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "已提交回答。",
+        Lang::ZhTw => "已提交回答。",
+        Lang::Ja => "回答を送信しました。",
+        Lang::Ko => "답변을 보냈습니다.",
+        Lang::Es => "Respuesta enviada.",
+        Lang::De => "Antwort gesendet.",
+        Lang::Fr => "Réponse envoyée.",
+        Lang::Pt => "Resposta enviada.",
+        Lang::Ar => "تم إرسال الإجابة.",
+        Lang::En => "Answer sent.",
+    }
+}
+
+pub fn question_reply_deferred(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "已跳过，智能体会自己判断。",
+        Lang::ZhTw => "已略過，智慧代理會自行判斷。",
+        Lang::Ja => "スキップしました。エージェントが判断します。",
+        Lang::Ko => "건너뛰었습니다. 에이전트가 판단합니다.",
+        Lang::Es => "Omitida; el agente decidirá.",
+        Lang::De => "Übersprungen; der Agent entscheidet.",
+        Lang::Fr => "Ignorée ; l'agent décidera.",
+        Lang::Pt => "Ignorada; o agente decidirá.",
+        Lang::Ar => "تم التخطي؛ سيقرر الوكيل بنفسه.",
+        Lang::En => "Skipped; the agent will decide.",
+    }
+}
+
+pub fn question_reply_gone(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "这个问题已经回答过或已取消。",
+        Lang::ZhTw => "這個問題已經回答過或已取消。",
+        Lang::Ja => "この質問は回答済みか、取り消されました。",
+        Lang::Ko => "이 질문은 이미 답변되었거나 취소되었습니다.",
+        Lang::Es => "Esta pregunta ya fue respondida o cancelada.",
+        Lang::De => "Diese Frage wurde bereits beantwortet oder abgebrochen.",
+        Lang::Fr => "Cette question a déjà reçu une réponse ou a été annulée.",
+        Lang::Pt => "Esta pergunta já foi respondida ou cancelada.",
+        Lang::Ar => "تمت الإجابة على هذا السؤال أو أُلغي.",
+        Lang::En => "This question was already answered or canceled.",
+    }
+}
+
+pub fn question_reply_failed(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "提交回答失败：",
+        Lang::ZhTw => "提交回答失敗：",
+        Lang::Ja => "回答の送信に失敗しました: ",
+        Lang::Ko => "답변 전송 실패: ",
+        Lang::Es => "No se pudo enviar la respuesta: ",
+        Lang::De => "Antwort konnte nicht gesendet werden: ",
+        Lang::Fr => "Échec de l'envoi de la réponse : ",
+        Lang::Pt => "Falha ao enviar a resposta: ",
+        Lang::Ar => "تعذر إرسال الإجابة: ",
+        Lang::En => "Failed to send the answer: ",
     }
 }

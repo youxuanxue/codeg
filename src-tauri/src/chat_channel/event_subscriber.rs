@@ -774,14 +774,52 @@ async fn process_envelope(
             }
         }
 
+        // A question push on a channel that can answer it by reply says so.
+        let question = match &envelope.payload {
+            AcpEvent::QuestionRequest {
+                question_id,
+                questions,
+            } if super::question_reply::answerable_from_chat(questions)
+                && super::question_reply::channel_supports_reply(
+                    manager.channel_type(ch.id).await,
+                ) =>
+            {
+                Some(question_id)
+            }
+            _ => None,
+        };
+        let replyable;
+        let to_send = match question {
+            Some(_) => {
+                replyable = RichMessage {
+                    body: super::i18n::question_request_reply_body(config.lang).to_string(),
+                    ..msg.clone()
+                };
+                &replyable
+            }
+            None => &msg,
+        };
+
         // Send
-        let send_result = manager.send_to_channel(ch.id, &msg).await;
+        let send_result = manager.send_to_channel(ch.id, to_send).await;
         let (status, error_detail) = match &send_result {
-            Ok(_) => {
+            Ok(sent) => {
                 // Only update the debounce timestamp on success, and only for
                 // debounced event types.
                 if debounced {
                     last_push.insert(key, now);
+                }
+                // A reply to this push answers the question it asked.
+                if let Some(question_id) = question {
+                    super::question_reply::track(
+                        ch.id,
+                        &sent.0,
+                        super::question_reply::QuestionRef {
+                            connection_id: envelope.connection_id.clone(),
+                            question_id: question_id.clone(),
+                        },
+                    )
+                    .await;
                 }
                 ("sent", None)
             }
@@ -793,7 +831,7 @@ async fn process_envelope(
             ch.id,
             "outbound",
             "event_push",
-            &msg.to_plain_text(),
+            &to_send.to_plain_text(),
             status,
             error_detail,
         )
@@ -906,12 +944,19 @@ mod permission_push_tests {
     }
 
     async fn manager_with_recorder(channel_id: i32) -> (ChatChannelManager, Recorder) {
+        manager_with_recorder_of(channel_id, ChannelType::Telegram).await
+    }
+
+    async fn manager_with_recorder_of(
+        channel_id: i32,
+        channel_type: ChannelType,
+    ) -> (ChatChannelManager, Recorder) {
         let chat = ChatChannelManager::new();
         let rec = Recorder::default();
         chat.add_channel(
             channel_id,
             "test".into(),
-            ChannelType::Telegram,
+            channel_type,
             Box::new(RecordingBackend { rec: rec.clone() }),
         )
         .await
@@ -2025,11 +2070,54 @@ mod permission_push_tests {
         assert_eq!(msgs.len(), 1, "expected one push, got {msgs:?}");
         assert!(msgs[0].contains("Agent Question"), "got {:?}", msgs[0]);
         assert!(msgs[0].contains("Which approach?"), "got {:?}", msgs[0]);
+        // Telegram does not say which message a reply quotes: answer in Codeg,
+        // and nothing is remembered for a reply.
+        assert!(msgs[0].contains("Answer it in Codeg"), "got {:?}", msgs[0]);
+        assert_eq!(crate::chat_channel::question_reply::lookup(7, "1").await, None);
+    }
+
+    /// On Lark a reply to the push answers the question: the push says so, and
+    /// its sent id is remembered for the reply to find.
+    #[tokio::test]
+    async fn question_request_on_lark_is_answerable_by_reply() {
+        let db = test_helpers::fresh_in_memory_db().await;
+        let (chat, rec) = manager_with_recorder_of(8, ChannelType::Lark).await;
+        let bridge = Arc::new(Mutex::new(SessionBridge::new()));
+        let config = config_all_on(8);
+        let mut last_push = HashMap::new();
+
+        process_envelope(
+            &question_request_envelope("desktop-conn"),
+            &bridge,
+            &chat,
+            &db.conn,
+            &config,
+            &mut last_push,
+            &test_client(),
+            &ConnectionDirectory::default(),
+        )
+        .await;
+
+        let msgs = sent(&rec).await;
+        assert_eq!(msgs.len(), 1, "expected one push, got {msgs:?}");
+        assert!(msgs[0].contains("Which approach?"), "got {:?}", msgs[0]);
+        assert!(
+            msgs[0].contains("Reply to this message"),
+            "got {:?}",
+            msgs[0]
+        );
+        assert_eq!(
+            crate::chat_channel::question_reply::lookup(8, "1").await,
+            Some(crate::chat_channel::question_reply::QuestionRef {
+                connection_id: "desktop-conn".into(),
+                question_id: "q-1".into(),
+            })
+        );
     }
 
     /// Unlike permission_request, a question from a chat-channel-bridged
-    /// connection is NOT suppressed: there is no IM `/answer` flow, so the push
-    /// is the only signal the user gets that the agent is blocked.
+    /// connection is NOT suppressed: the push is how the question is answered
+    /// from chat (a reply to it, see `question_reply`), bridged or not.
     #[tokio::test]
     async fn question_request_bridged_is_still_pushed() {
         let db = test_helpers::fresh_in_memory_db().await;
@@ -2057,7 +2145,7 @@ mod permission_push_tests {
         assert_eq!(
             sent(&rec).await.len(),
             1,
-            "a bridged question must still notify (no IM answer flow to defer to)"
+            "a bridged question must still notify: the push is how chat answers it"
         );
     }
 

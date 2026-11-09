@@ -6,6 +6,7 @@ pub mod event_subscriber;
 pub mod i18n;
 pub mod manager;
 pub mod message_formatter;
+pub mod question_reply;
 pub mod scheduler;
 pub mod session_bridge;
 pub mod session_commands;
