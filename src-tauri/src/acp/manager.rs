@@ -3937,6 +3937,17 @@ impl ConnectionManager {
         Ok(())
     }
 
+    /// The questions of a still-pending ask, `None` once it was answered,
+    /// canceled or never existed. Read-only: answering stays
+    /// [`Self::answer_question`]'s.
+    pub async fn pending_question_specs(&self, question_id: &str) -> Option<Vec<QuestionSpec>> {
+        self.pending_questions
+            .lock()
+            .await
+            .get(question_id)
+            .map(|entry| entry.questions.clone())
+    }
+
     /// Cancel a pending `ask_user_question` — the companion's tool call was
     /// canceled (peer-close) or the connection is tearing down. Removes the
     /// one-shot (dropping the sender unblocks the listener with a declined

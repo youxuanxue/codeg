@@ -129,6 +129,16 @@ impl ChatChannelManager {
         }
     }
 
+    /// The type of a connected channel, `None` when it is not connected.
+    pub async fn channel_type(&self, channel_id: i32) -> Option<ChannelType> {
+        self.inner
+            .channels
+            .lock()
+            .await
+            .get(&channel_id)
+            .map(|channel| channel.channel_type)
+    }
+
     pub async fn send_to_channel(
         &self,
         channel_id: i32,

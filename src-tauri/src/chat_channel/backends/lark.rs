@@ -459,18 +459,22 @@ async fn handle_lark_event(
             return;
         }
 
-        // Group chat filtering: only process if bot is mentioned
+        // Group chat filtering: only process if bot is mentioned, or the
+        // message replies to another (a reply to an agent's question push
+        // answers it — see `question_reply`). A reply to anything else is
+        // dropped by the dispatcher, which only acts on tracked pushes.
         let chat_type = event
             .pointer("/event/message/chat_type")
             .and_then(|v| v.as_str())
             .unwrap_or("p2p");
 
         if chat_type == "group" {
-            let mentions = event
+            let mentioned = event
                 .pointer("/event/message/mentions")
-                .and_then(|v| v.as_array());
-            if mentions.is_none() || mentions.unwrap().is_empty() {
-                return; // No mentions in group chat, ignore
+                .and_then(|v| v.as_array())
+                .is_some_and(|m| !m.is_empty());
+            if !mentioned && lark_reply_parent_id(event).is_none() {
+                return;
             }
         }
 
@@ -518,6 +522,14 @@ async fn handle_lark_event(
             })
             .await;
     }
+}
+
+/// The message a Lark message replies to, when it is a reply.
+pub(crate) fn lark_reply_parent_id(event: &serde_json::Value) -> Option<&str> {
+    event
+        .pointer("/event/message/parent_id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
 }
 
 /// Strip Lark mention placeholders (e.g. `@_user_1`) from the message text.
