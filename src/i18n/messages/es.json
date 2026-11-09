@@ -4590,6 +4590,8 @@
       "permissionRequestDesc": "Cuando un agente solicita permiso para actuar",
       "questionRequest": "Pregunta del agente",
       "questionRequestDesc": "Cuando un agente te hace una pregunta",
+      "taskAttention": "Tarea pendiente",
+      "taskAttentionDesc": "Cuando una tarea está lista para revisar o ha fallado",
       "userPromptSent": "Mensaje del usuario",
       "userPromptSentDesc": "Cuando envías un mensaje (el texto del mensaje se incluye en la notificación)",
       "topLevelOnly": "Solo sesiones principales",

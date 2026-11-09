@@ -4590,6 +4590,8 @@
       "permissionRequestDesc": "Wenn ein Agent eine Berechtigung anfordert",
       "questionRequest": "Frage des Agenten",
       "questionRequestDesc": "Wenn ein Agent dir eine Frage stellt",
+      "taskAttention": "Aufgabe braucht dich",
+      "taskAttentionDesc": "Wenn eine Aufgabe zur Prüfung bereit ist oder fehlgeschlagen ist",
       "userPromptSent": "Benutzernachricht",
       "userPromptSentDesc": "Wenn du eine Nachricht sendest – der Nachrichtentext ist in der Benachrichtigung enthalten",
       "topLevelOnly": "Nur Hauptsitzungen",

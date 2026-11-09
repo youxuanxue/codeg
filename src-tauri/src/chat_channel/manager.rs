@@ -364,6 +364,13 @@ impl ChatChannelManager {
             conn_mgr.clone_ref(),
         );
 
+        // Spawn work task attention pushes (review / failed)
+        super::event_subscriber::spawn_task_attention_subscriber(
+            broadcaster.clone(),
+            self.clone_ref(),
+            db_conn.clone(),
+        );
+
         // Spawn session event subscriber (ACP event routing to channels)
         let manager_for_session_events = self.clone_ref();
         super::session_event_subscriber::spawn_session_event_subscriber(

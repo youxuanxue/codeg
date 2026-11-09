@@ -4610,6 +4610,8 @@
       "permissionRequestDesc": "When an agent requests permission to act",
       "questionRequest": "Agent Question",
       "questionRequestDesc": "When an agent asks you a question",
+      "taskAttention": "Task needs you",
+      "taskAttentionDesc": "When a task is ready for review or has failed",
       "userPromptSent": "User Message",
       "userPromptSentDesc": "When you send a message — the message text is included in the notification",
       "topLevelOnly": "Top-level sessions only",

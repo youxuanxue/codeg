@@ -4590,6 +4590,8 @@
       "permissionRequestDesc": "عندما يطلب الوكيل إذنًا لتنفيذ إجراء",
       "questionRequest": "سؤال من الوكيل",
       "questionRequestDesc": "عندما يطرح أحد الوكلاء سؤالاً عليك",
+      "taskAttention": "مهمة تحتاج إليك",
+      "taskAttentionDesc": "عندما تصبح مهمة جاهزة للمراجعة أو تفشل",
       "userPromptSent": "رسالة المستخدم",
       "userPromptSentDesc": "عند إرسالك رسالة — يُضمَّن نص الرسالة في الإشعار",
       "topLevelOnly": "الجلسات الرئيسية فقط",

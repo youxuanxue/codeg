@@ -269,3 +269,74 @@ mod question_request_tests {
         assert_eq!(msg.title.as_deref(), Some("智能体提问"));
     }
 }
+
+/// Longest slice of a task's summary or error a push carries: enough to decide
+/// whether to open the task, short of what a chat bubble renders well.
+const TASK_TEXT_MAX_CHARS: usize = 600;
+
+fn clip(text: &str) -> String {
+    let text = text.trim();
+    match text.char_indices().nth(TASK_TEXT_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    }
+}
+
+/// The push for a work task that now needs the user: it entered review (its
+/// result is ready to judge) or failed. The agent's own `task_complete`
+/// summary is the body of the decision; the link opens the run behind it.
+pub fn format_task_attention(
+    task: &crate::db::entities::work_task::Model,
+    project: Option<&str>,
+    lang: Lang,
+) -> Option<RichMessage> {
+    use crate::db::entities::work_task::WorkTaskStatus;
+    let mut msg = match task.status {
+        WorkTaskStatus::Review => {
+            RichMessage::info(task.title.clone()).with_title(i18n::task_review_title(lang))
+        }
+        WorkTaskStatus::Failed => {
+            RichMessage::error(task.title.clone()).with_title(i18n::task_failed_title(lang))
+        }
+        _ => return None,
+    };
+    if let Some(project) = project {
+        msg = msg.with_field(i18n::task_project_label(lang), project);
+    }
+    match task.status {
+        WorkTaskStatus::Review => {
+            if let Some(summary) = task
+                .result_summary
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+            {
+                msg = msg.with_field(i18n::task_summary_label(lang), clip(summary));
+            }
+            if let (Some(files), Some(add), Some(del)) =
+                (task.files_changed, task.additions, task.deletions)
+            {
+                msg = msg.with_field(
+                    i18n::task_changes_label(lang),
+                    format!("{files} files, +{add} −{del}"),
+                );
+            }
+        }
+        _ => {
+            let reason = task
+                .last_error
+                .as_deref()
+                .or(task.failure_reason.as_deref())
+                .filter(|s| !s.trim().is_empty());
+            if let Some(reason) = reason {
+                msg = msg.with_field(i18n::task_reason_label(lang), clip(reason));
+            }
+        }
+    }
+    if let Some(conversation_id) = task.conversation_id {
+        msg = msg.with_field(
+            i18n::task_link_label(lang),
+            format!("codeg://session/{conversation_id}"),
+        );
+    }
+    Some(msg)
+}
