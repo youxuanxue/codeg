@@ -499,6 +499,21 @@ pub async fn update_folder_default_agent(
     Ok(Some(to_detail(updated)))
 }
 
+/// [`list_folders`] without task worktrees and other child folders: the
+/// projects a user names.
+pub async fn list_top_level_folders(
+    conn: &DatabaseConnection,
+) -> Result<Vec<FolderHistoryEntry>, DbError> {
+    let rows = folder::Entity::find()
+        .filter(folder::Column::DeletedAt.is_null())
+        .filter(folder::Column::Kind.eq(FolderKind::Regular))
+        .filter(folder::Column::ParentId.is_null())
+        .order_by_desc(folder::Column::LastOpenedAt)
+        .all(conn)
+        .await?;
+    Ok(rows.into_iter().map(to_entry).collect())
+}
+
 pub async fn list_folders(conn: &DatabaseConnection) -> Result<Vec<FolderHistoryEntry>, DbError> {
     let rows = folder::Entity::find()
         .filter(folder::Column::DeletedAt.is_null())

@@ -22,7 +22,7 @@ use crate::db::service::{
 use crate::db::AppDatabase;
 use crate::models::agent::AgentType;
 use crate::models::conversation::DbConversationSummary;
-use crate::models::folder::FolderDetail;
+use crate::models::folder::{FolderDetail, FolderHistoryEntry};
 use crate::web::event_bridge::EventEmitter;
 
 pub struct FollowupRequest<'a> {
@@ -108,6 +108,69 @@ pub async fn handle_folder(
 
     // Treat as path
     select_folder_by_path(db, args, channel_id, sender_id, lang).await
+}
+
+/// The project a plain-text request names: the folder whose name appears in
+/// `text` as a whole word (case-insensitive), the longest such name winning,
+/// so "codeg-probe" beats "codeg" in "look at codeg-probe" and "codeg" alone
+/// does not match "codeg-probe". `None` when no name, or two equally long
+/// different ones, appear.
+pub(crate) fn folder_named_in<'a>(
+    text: &str,
+    folders: &'a [FolderHistoryEntry],
+) -> Option<&'a FolderHistoryEntry> {
+    let lower = text.to_lowercase();
+    let is_word_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let named = |name: &str| {
+        let name = name.to_lowercase();
+        if name.is_empty() {
+            return false;
+        }
+        lower.match_indices(&name).any(|(at, _)| {
+            let before = lower[..at].chars().next_back();
+            let after = lower[at + name.len()..].chars().next();
+            !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char)
+        })
+    };
+    let mut best: Option<&FolderHistoryEntry> = None;
+    let mut tie = false;
+    for f in folders.iter().filter(|f| named(&f.name)) {
+        match best {
+            Some(b) if f.name.len() < b.name.len() => {}
+            Some(b) if f.name.len() == b.name.len() => tie |= !b.name.eq_ignore_ascii_case(&f.name),
+            _ => {
+                best = Some(f);
+                tie = false;
+            }
+        }
+    }
+    if tie {
+        None
+    } else {
+        best
+    }
+}
+
+/// The folder a plain-text request should run in: the project it names, else
+/// the sender's current folder. A named project becomes the current one, as
+/// `/folder <name>` would. `None` when neither exists.
+pub async fn folder_for_plain_text(
+    db: &DatabaseConnection,
+    text: &str,
+    channel_id: i32,
+    sender_id: &str,
+) -> Option<i32> {
+    // Top-level projects only: task worktrees carry their project's name.
+    let folders = folder_service::list_top_level_folders(db).await.ok()?;
+    if let Some(named) = folder_named_in(text, &folders) {
+        let _ =
+            sender_context_service::update_folder(db, channel_id, sender_id, Some(named.id)).await;
+        return Some(named.id);
+    }
+    sender_context_service::get_or_create(db, channel_id, sender_id)
+        .await
+        .ok()?
+        .current_folder_id
 }
 
 pub async fn handle_folder_picker(
@@ -2427,5 +2490,87 @@ mod tests {
         assert_eq!(answered_option(&mut rx), None);
         assert_eq!(pending_request_id(&bridge).await.as_deref(), Some("req-1"));
         assert_eq!(reply.body, i18n::no_reject_once_option(Lang::En));
+    }
+
+    fn entry(id: i32, name: &str) -> FolderHistoryEntry {
+        FolderHistoryEntry {
+            id,
+            path: format!("/p/{name}"),
+            name: name.into(),
+            last_opened_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_plain_request_names_its_project_as_a_whole_word() {
+        let folders = vec![
+            entry(1, "codeg"),
+            entry(2, "codeg-probe"),
+            entry(3, "sub2api"),
+        ];
+        let named = |t: &str| folder_named_in(t, &folders).map(|f| f.id);
+        assert_eq!(named("看下 codeg 项目的情况"), Some(1));
+        assert_eq!(
+            named("看下Codeg的情况"),
+            Some(1),
+            "case-insensitive, CJK neighbours"
+        );
+        assert_eq!(
+            named("check codeg-probe please"),
+            Some(2),
+            "longest name wins"
+        );
+        assert_eq!(named("sub2api 的 CI 挂了"), Some(3));
+        assert_eq!(named("look at codeg."), Some(1), "sentence punctuation");
+        assert_eq!(
+            named("codegx is not a project"),
+            None,
+            "part of a longer word"
+        );
+        assert_eq!(named("今天天气怎么样"), None);
+    }
+
+    #[test]
+    fn two_different_projects_named_equally_is_no_match() {
+        let folders = vec![entry(1, "alpha"), entry(2, "omega")];
+        assert!(folder_named_in("compare alpha and omega", &folders).is_none());
+    }
+
+    /// The named project wins and becomes current; without a name the current
+    /// folder is used; a task worktree never matches; with neither, `None`.
+    #[tokio::test]
+    async fn plain_text_resolves_the_named_or_current_folder() {
+        let db = fresh_in_memory_db().await;
+        let ch = seed_chat_channel(&db).await;
+        let codeg = seed_folder(&db, "/p/codeg").await;
+        let other = seed_folder(&db, "/p/sub2api").await;
+        folder_service::add_folder_with_parent(&db.conn, "/p/codeg-task-1", Some(codeg))
+            .await
+            .unwrap();
+
+        assert_eq!(folder_for_plain_text(&db.conn, "你好", ch, "u").await, None);
+
+        assert_eq!(
+            folder_for_plain_text(&db.conn, "看下 sub2api 的情况", ch, "u").await,
+            Some(other)
+        );
+        assert_eq!(
+            sender_context_service::get_or_create(&db.conn, ch, "u")
+                .await
+                .unwrap()
+                .current_folder_id,
+            Some(other),
+            "the named project becomes current"
+        );
+        assert_eq!(
+            folder_for_plain_text(&db.conn, "再跑一次测试", ch, "u").await,
+            Some(other),
+            "no name: the current folder"
+        );
+        assert_eq!(
+            folder_for_plain_text(&db.conn, "看下 codeg-task-1", ch, "u").await,
+            Some(other),
+            "a task worktree is not a project to name"
+        );
     }
 }

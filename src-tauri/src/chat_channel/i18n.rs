@@ -601,7 +601,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - 渠道连接状态\n\
              {prefix}help - 显示帮助\n\
              \n\
-             有活跃会话时，直接发文本即可继续对话"
+             直接发一句话即开始任务：提到项目名就在该项目里做，否则用当前目录；有活跃会话时则继续对话"
         ),
         Lang::ZhTw => format!(
             "{prefix}folder - 選擇工作目錄\n\
@@ -618,7 +618,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - 頻道連線狀態\n\
              {prefix}help - 顯示幫助\n\
              \n\
-             有活躍對話時，直接發文字即可繼續對話"
+             直接發一句話即開始任務：提到專案名就在該專案裡做，否則用當前目錄；有活躍對話時則繼續對話"
         ),
         Lang::Ja => format!(
             "{prefix}folder - 作業フォルダを選択\n\
@@ -635,7 +635,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - チャンネル接続状況\n\
              {prefix}help - ヘルプを表示\n\
              \n\
-             セッションがアクティブな場合、テキストを送信するだけで会話を続けられます"
+             テキストを送るとタスクを開始します（プロジェクト名があればそのプロジェクト、なければ現在のフォルダ）。アクティブなセッションがあれば会話を続けます"
         ),
         Lang::Ko => format!(
             "{prefix}folder - 작업 폴더 선택\n\
@@ -652,7 +652,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - 채널 연결 상태\n\
              {prefix}help - 도움말 표시\n\
              \n\
-             세션이 활성화된 경우 텍스트를 보내면 대화를 계속할 수 있습니다"
+             텍스트를 보내면 작업을 시작합니다 (프로젝트 이름이 있으면 그 프로젝트, 없으면 현재 폴더). 활성 세션이 있으면 대화를 계속합니다"
         ),
         Lang::Es => format!(
             "{prefix}folder - Seleccionar carpeta de trabajo\n\
@@ -669,7 +669,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - Estado de canales\n\
              {prefix}help - Mostrar ayuda\n\
              \n\
-             Cuando hay una sesion activa, simplemente escriba texto para continuar"
+             Escriba texto para iniciar una tarea (en el proyecto que nombre, o en la carpeta actual); con una sesion activa, continua la conversacion"
         ),
         Lang::De => format!(
             "{prefix}folder - Arbeitsordner auswahlen\n\
@@ -686,7 +686,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - Kanalstatus\n\
              {prefix}help - Hilfe anzeigen\n\
              \n\
-             Bei aktiver Sitzung einfach Text eingeben, um das Gesprach fortzusetzen"
+             Text startet eine Aufgabe (im genannten Projekt, sonst im aktuellen Ordner); bei aktiver Sitzung geht das Gesprach weiter"
         ),
         Lang::Fr => format!(
             "{prefix}folder - Selectionner le dossier de travail\n\
@@ -703,7 +703,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - Statut des canaux\n\
              {prefix}help - Afficher l'aide\n\
              \n\
-             Lorsqu'une session est active, envoyez du texte pour continuer la conversation"
+             Envoyez du texte pour lancer une tache (dans le projet nomme, sinon le dossier actuel) ; avec une session active, la conversation continue"
         ),
         Lang::Pt => format!(
             "{prefix}folder - Selecionar pasta de trabalho\n\
@@ -720,7 +720,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - Status dos canais\n\
              {prefix}help - Mostrar ajuda\n\
              \n\
-             Quando uma sessao esta ativa, basta digitar texto para continuar a conversa"
+             Digite texto para iniciar uma tarefa (no projeto citado, ou na pasta atual); com uma sessao ativa, a conversa continua"
         ),
         Lang::Ar => format!(
             "{prefix}folder - اختيار مجلد العمل\n\
@@ -737,7 +737,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - حالة القنوات\n\
              {prefix}help - عرض المساعدة\n\
              \n\
-             عندما تكون الجلسة نشطة، ارسل نصا لمتابعة المحادثة"
+             أرسل نصا لبدء مهمة (في المشروع المذكور، أو المجلد الحالي)؛ مع جلسة نشطة تستمر المحادثة"
         ),
         Lang::En => format!(
             "{prefix}folder - Select working folder\n\
@@ -754,7 +754,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - Channel connection status\n\
              {prefix}help - Show help\n\
              \n\
-             When a session is active, just type text to continue the conversation"
+             Type text to start a task (in the project it names, else the current folder); with an active session it continues the conversation"
         ),
     }
 }
