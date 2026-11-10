@@ -84,4 +84,27 @@ elif command -v xmllint >/dev/null; then
   xmllint --noout "$tmp/a.plist" "$tmp/b.plist" || fail "xml lint"
 fi
 
+# Registry fallback: a step that fails on the configured registry runs once
+# more against the public one; a step that passes runs once; a step that fails
+# on both fails the install.
+cat >"$tmp/fakebin/step" <<SH
+#!/bin/sh
+echo "\${npm_config_registry:-default}" >>"$tmp/step.calls"
+[ -n "\${npm_config_registry:-}" ] && [ -z "\${STEP_ALWAYS_FAIL:-}" ]
+SH
+chmod +x "$tmp/fakebin/step"
+: >"$tmp/step.calls"
+(PATH="$tmp/fakebin:$PATH" with_registry_fallback step) 2>/dev/null || fail "fallback should succeed"
+[ "$(tr '\n' '|' <"$tmp/step.calls")" = "default|$PUBLIC_REGISTRY|" ] \
+  || fail "fallback calls: $(cat "$tmp/step.calls")"
+: >"$tmp/step.calls"
+(PATH="$tmp/fakebin:$PATH" npm_config_registry=https://mirror.example with_registry_fallback step) \
+  || fail "a passing step"
+[ "$(wc -l <"$tmp/step.calls" | tr -d ' ')" = 1 ] || fail "a passing step ran twice"
+: >"$tmp/step.calls"
+if (PATH="$tmp/fakebin:$PATH" STEP_ALWAYS_FAIL=1 with_registry_fallback step) 2>/dev/null; then
+  fail "a step failing on both registries should fail"
+fi
+[ "$(wc -l <"$tmp/step.calls" | tr -d ' ')" = 2 ] || fail "retried more than once"
+
 echo "local-deploy: ok"
