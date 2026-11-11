@@ -11657,11 +11657,16 @@ pub(crate) fn build_runtime_env_from_setting(
     merged
 }
 
-/// Read the Claude model ids from the cc-switch unified Pi catalog that backs
-/// the same provider credentials. cc-switch keeps the catalog in Pi's native
+/// Chat model ids from the cc-switch unified Pi catalog that backs the same
+/// provider credentials. cc-switch keeps the catalog in Pi's native
 /// `models.json` even when Claude Code is the active client; matching both the
 /// endpoint and key prevents another gateway's models from leaking into the
 /// Claude picker when several providers are configured.
+///
+/// Claude ids are always kept. Every other id is kept when that provider
+/// speaks the Anthropic messages API, which is how a gateway such as tokenkey
+/// serves GPT, DeepSeek, Gemini, GLM, Kimi, Qwen, and the rest of one catalog
+/// to Claude Code. The picker does not classify those ids by vendor or modality.
 pub(crate) fn cc_switch_claude_model_catalog(
     runtime_env: &BTreeMap<String, String>,
 ) -> Vec<(String, String, Option<String>)> {
@@ -11725,14 +11730,12 @@ pub(crate) fn cc_switch_claude_model_catalog(
         let Some(models) = provider.get("models").and_then(serde_json::Value::as_array) else {
             continue;
         };
+        let anthropic_gateway = provider_serves_claude_protocol(provider);
         for model in models {
             let Some(id) = model.get("id").and_then(serde_json::Value::as_str) else {
                 continue;
             };
-            // Claude's picker should contain models that the Claude protocol
-            // gateway can serve. Keep the catalog focused on Claude ids while
-            // retaining AWS-style `us.anthropic.claude-*` entries.
-            if !(id.starts_with("claude-") || id.contains(".anthropic.claude-")) {
+            if !claude_picker_catalog_id(id, anthropic_gateway) {
                 continue;
             }
             let name = model
@@ -11751,6 +11754,35 @@ pub(crate) fn cc_switch_claude_model_catalog(
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     rows.dedup_by(|a, b| a.0 == b.0);
     rows
+}
+
+/// Whether `provider` is called with Claude's messages API. A missing `api`
+/// still counts: the caller already matched `ANTHROPIC_BASE_URL`. An explicit
+/// OpenAI protocol does not, so its non-Claude ids stay on that client.
+fn provider_serves_claude_protocol(provider: &serde_json::Value) -> bool {
+    match provider
+        .get("api")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    {
+        None | Some("") => true,
+        Some("anthropic-messages" | "anthropic") => true,
+        Some(_) => false,
+    }
+}
+
+/// A catalog id Claude's picker can offer. `anthropic_gateway` is the
+/// provider's protocol ([`provider_serves_claude_protocol`]). Claude ids do
+/// not need it; every other id does, and none of those are classified further.
+fn claude_picker_catalog_id(id: &str, anthropic_gateway: bool) -> bool {
+    is_claude_catalog_id(id) || anthropic_gateway
+}
+
+/// A Claude model id, including a Bedrock-style `….anthropic.claude-…` spelling.
+/// These stay out of the launch `modelPicker`: the composer already merges them,
+/// and a concrete id there would be preferred over the family alias.
+pub(crate) fn is_claude_catalog_id(id: &str) -> bool {
+    id.starts_with("claude-") || id.contains(".anthropic.claude-")
 }
 
 fn normalize_catalog_url(value: &str) -> String {
@@ -24580,7 +24612,7 @@ model = "gpt"
     }
 
     #[test]
-    fn cc_switch_claude_model_catalog_matches_key_filters_non_claude_and_dedups() {
+    fn cc_switch_claude_model_catalog_matches_key_keeps_gateway_models_and_dedups() {
         let dir = tempfile::tempdir().expect("tempdir");
         let models = dir.path().join("models.json");
         std::fs::write(
@@ -24589,10 +24621,18 @@ model = "gpt"
                 "providers": {
                     "exact": {
                         "baseUrl": "https://gw.example/v1",
+                        "api": "anthropic-messages",
                         "apiKey": "sk-exact",
                         "models": [
                             {"id": "claude-opus-5-5", "name": "Opus"},
                             {"id": "gpt-4o", "name": "GPT"},
+                            {"id": "openai/gpt-5.6", "name": "GPT 5.6"},
+                            {"id": "gpt-image-2", "name": "GPT Image"},
+                            {"id": "deepseek-v4-pro", "name": "DeepSeek"},
+                            {"id": "gemini-3-flash", "name": "Gemini"},
+                            {"id": "glm-5.2", "name": "GLM"},
+                            {"id": "kimi-k2.6", "name": "Kimi"},
+                            {"id": "qwen-plus", "name": "Qwen"},
                             {"id": "us.anthropic.claude-sonnet-5", "name": "Sonnet"},
                             {"id": "claude-opus-5-5", "name": "Opus dup"},
                         ]
@@ -24625,9 +24665,63 @@ model = "gpt"
         let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["claude-opus-5-5", "us.anthropic.claude-sonnet-5"],
-            "exact key match must drop the other-key provider and non-claude ids: {rows:?}"
+            vec![
+                "claude-opus-5-5",
+                "deepseek-v4-pro",
+                "gemini-3-flash",
+                "glm-5.2",
+                "gpt-4o",
+                "gpt-image-2",
+                "kimi-k2.6",
+                "openai/gpt-5.6",
+                "qwen-plus",
+                "us.anthropic.claude-sonnet-5",
+            ],
+            "exact key match keeps every id from that provider and drops the other key: {rows:?}"
         );
+        assert_eq!(
+            rows.iter().find(|(id, _, _)| id == "gpt-4o").unwrap().1,
+            "GPT"
+        );
+    }
+
+    #[test]
+    fn cc_switch_claude_model_catalog_skips_foreign_ids_on_an_openai_protocol_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("models.json"),
+            serde_json::json!({
+                "providers": {
+                    "openai": {
+                        "baseUrl": "https://gw.example",
+                        "api": "openai-completions",
+                        "apiKey": "sk-exact",
+                        "models": [
+                            {"id": "claude-opus-5-5", "name": "Opus"},
+                            {"id": "gpt-5.6", "name": "GPT"},
+                            {"id": "qwen-plus", "name": "Qwen"}
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write");
+
+        let mut env = BTreeMap::new();
+        env.insert(
+            "PI_CODING_AGENT_DIR".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        );
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://gw.example/v1".to_string(),
+        );
+        env.insert("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-exact".to_string());
+
+        let rows = cc_switch_claude_model_catalog(&env);
+        let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["claude-opus-5-5"]);
     }
 
     #[test]
@@ -24680,7 +24774,11 @@ model = "gpt"
                     "a": {
                         "baseUrl": "https://gw.example",
                         "apiKey": "sk-a",
-                        "models": [{"id": "claude-opus-5-5", "name": "Opus"}]
+                        "models": [
+                            {"id": "claude-opus-5-5", "name": "Opus"},
+                            {"id": "gpt-5.6", "name": "GPT"},
+                            {"id": "kimi-k2.6", "name": "Kimi"}
+                        ]
                     }
                 }
             })
@@ -24703,8 +24801,12 @@ model = "gpt"
         );
 
         let rows = cc_switch_claude_model_catalog(&env);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, "claude-opus-5-5");
+        let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["claude-opus-5-5", "gpt-5.6", "kimi-k2.6"],
+            "a provider with no api still speaks the Anthropic endpoint it matched"
+        );
     }
 
     #[tokio::test]
