@@ -94,6 +94,7 @@ describe("ChannelEventsTab event filter (opt-in user_prompt_sent)", () => {
         "error",
         "permission_request",
         "question_request",
+        "task_attention",
         "user_prompt_sent",
       ])
     )
@@ -105,6 +106,7 @@ describe("ChannelEventsTab event filter (opt-in user_prompt_sent)", () => {
       "error",
       "permission_request",
       "question_request",
+      "task_attention",
       "user_prompt_sent",
     ])
     renderTab()
@@ -176,6 +178,7 @@ describe("ChannelEventsTab load failure", () => {
       "error",
       "permission_request",
       "question_request",
+      "task_attention",
       "user_prompt_sent",
     ])
     renderTab()

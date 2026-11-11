@@ -237,6 +237,21 @@ pub fn question_request_title(lang: Lang) -> &'static str {
     }
 }
 
+pub fn question_request_reply_body(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "智能体正在向你提问。直接回复这条消息作答，回「跳过」让它自己判断。",
+        Lang::ZhTw => "智慧代理正在向你提問。直接回覆這則訊息作答，回「跳過」讓它自行判斷。",
+        Lang::Ja => "エージェントが質問しています。このメッセージに返信して回答してください（「skip」で判断を任せます）。",
+        Lang::Ko => "에이전트가 질문하고 있습니다. 이 메시지에 답장해 답하세요 (\"skip\"이면 에이전트가 판단).",
+        Lang::Es => "Un agente te hace una pregunta. Responde a este mensaje (\"skip\" para que decida él).",
+        Lang::De => "Ein Agent stellt eine Frage. Antworte auf diese Nachricht (\"skip\" lässt ihn entscheiden).",
+        Lang::Fr => "Un agent vous pose une question. Répondez à ce message (\"skip\" pour le laisser décider).",
+        Lang::Pt => "Um agente está fazendo uma pergunta. Responda a esta mensagem (\"skip\" para ele decidir).",
+        Lang::Ar => "يطرح أحد الوكلاء سؤالاً. أجب بالرد على هذه الرسالة (\"skip\" ليقرر بنفسه).",
+        Lang::En => "An agent is asking a question. Reply to this message to answer (\"skip\" lets it decide).",
+    }
+}
+
 pub fn question_request_body(lang: Lang) -> &'static str {
     match lang {
         Lang::ZhCn => "智能体正在向你提问，请在 Codeg 中回答。",
@@ -586,7 +601,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - 渠道连接状态\n\
              {prefix}help - 显示帮助\n\
              \n\
-             有活跃会话时，直接发文本即可继续对话"
+             直接发一句话即开始任务：提到项目名就在该项目里做，否则用当前目录；有活跃会话时则继续对话"
         ),
         Lang::ZhTw => format!(
             "{prefix}folder - 選擇工作目錄\n\
@@ -603,7 +618,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - 頻道連線狀態\n\
              {prefix}help - 顯示幫助\n\
              \n\
-             有活躍對話時，直接發文字即可繼續對話"
+             直接發一句話即開始任務：提到專案名就在該專案裡做，否則用當前目錄；有活躍對話時則繼續對話"
         ),
         Lang::Ja => format!(
             "{prefix}folder - 作業フォルダを選択\n\
@@ -620,7 +635,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - チャンネル接続状況\n\
              {prefix}help - ヘルプを表示\n\
              \n\
-             セッションがアクティブな場合、テキストを送信するだけで会話を続けられます"
+             テキストを送るとタスクを開始します（プロジェクト名があればそのプロジェクト、なければ現在のフォルダ）。アクティブなセッションがあれば会話を続けます"
         ),
         Lang::Ko => format!(
             "{prefix}folder - 작업 폴더 선택\n\
@@ -637,7 +652,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - 채널 연결 상태\n\
              {prefix}help - 도움말 표시\n\
              \n\
-             세션이 활성화된 경우 텍스트를 보내면 대화를 계속할 수 있습니다"
+             텍스트를 보내면 작업을 시작합니다 (프로젝트 이름이 있으면 그 프로젝트, 없으면 현재 폴더). 활성 세션이 있으면 대화를 계속합니다"
         ),
         Lang::Es => format!(
             "{prefix}folder - Seleccionar carpeta de trabajo\n\
@@ -654,7 +669,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - Estado de canales\n\
              {prefix}help - Mostrar ayuda\n\
              \n\
-             Cuando hay una sesion activa, simplemente escriba texto para continuar"
+             Escriba texto para iniciar una tarea (en el proyecto que nombre, o en la carpeta actual); con una sesion activa, continua la conversacion"
         ),
         Lang::De => format!(
             "{prefix}folder - Arbeitsordner auswahlen\n\
@@ -671,7 +686,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - Kanalstatus\n\
              {prefix}help - Hilfe anzeigen\n\
              \n\
-             Bei aktiver Sitzung einfach Text eingeben, um das Gesprach fortzusetzen"
+             Text startet eine Aufgabe (im genannten Projekt, sonst im aktuellen Ordner); bei aktiver Sitzung geht das Gesprach weiter"
         ),
         Lang::Fr => format!(
             "{prefix}folder - Selectionner le dossier de travail\n\
@@ -688,7 +703,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - Statut des canaux\n\
              {prefix}help - Afficher l'aide\n\
              \n\
-             Lorsqu'une session est active, envoyez du texte pour continuer la conversation"
+             Envoyez du texte pour lancer une tache (dans le projet nomme, sinon le dossier actuel) ; avec une session active, la conversation continue"
         ),
         Lang::Pt => format!(
             "{prefix}folder - Selecionar pasta de trabalho\n\
@@ -705,7 +720,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - Status dos canais\n\
              {prefix}help - Mostrar ajuda\n\
              \n\
-             Quando uma sessao esta ativa, basta digitar texto para continuar a conversa"
+             Digite texto para iniciar uma tarefa (no projeto citado, ou na pasta atual); com uma sessao ativa, a conversa continua"
         ),
         Lang::Ar => format!(
             "{prefix}folder - اختيار مجلد العمل\n\
@@ -722,7 +737,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - حالة القنوات\n\
              {prefix}help - عرض المساعدة\n\
              \n\
-             عندما تكون الجلسة نشطة، ارسل نصا لمتابعة المحادثة"
+             أرسل نصا لبدء مهمة (في المشروع المذكور، أو المجلد الحالي)؛ مع جلسة نشطة تستمر المحادثة"
         ),
         Lang::En => format!(
             "{prefix}folder - Select working folder\n\
@@ -739,7 +754,7 @@ pub fn help_body(lang: Lang, prefix: &str) -> String {
              {prefix}status - Channel connection status\n\
              {prefix}help - Show help\n\
              \n\
-             When a session is active, just type text to continue the conversation"
+             Type text to start a task (in the project it names, else the current folder); with an active session it continues the conversation"
         ),
     }
 }
@@ -1635,5 +1650,174 @@ pub fn agent_responding(lang: Lang, agent_label: &str) -> String {
         // bidi reordering stays predictable across Telegram/Lark/WeiXin clients.
         Lang::Ar => format!("\u{2068}{agent_label}\u{2069} يستجيب..."),
         Lang::En => format!("{agent_label} is responding..."),
+    }
+}
+
+// Work task attention (a task that now needs the user: review / failed)
+
+pub fn task_review_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "任务待审",
+        Lang::ZhTw => "任務待審",
+        Lang::Ja => "タスクのレビュー待ち",
+        Lang::Ko => "작업 검토 대기",
+        Lang::Es => "Tarea lista para revisar",
+        Lang::De => "Aufgabe wartet auf Prüfung",
+        Lang::Fr => "Tâche à relire",
+        Lang::Pt => "Tarefa pronta para revisão",
+        Lang::Ar => "المهمة بانتظار المراجعة",
+        Lang::En => "Task Ready for Review",
+    }
+}
+
+pub fn task_failed_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "任务失败",
+        Lang::ZhTw => "任務失敗",
+        Lang::Ja => "タスク失敗",
+        Lang::Ko => "작업 실패",
+        Lang::Es => "Tarea fallida",
+        Lang::De => "Aufgabe fehlgeschlagen",
+        Lang::Fr => "Échec de la tâche",
+        Lang::Pt => "Tarefa falhou",
+        Lang::Ar => "فشلت المهمة",
+        Lang::En => "Task Failed",
+    }
+}
+
+pub fn task_project_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "项目",
+        Lang::ZhTw => "專案",
+        Lang::Ja => "プロジェクト",
+        Lang::Ko => "프로젝트",
+        Lang::Es => "Proyecto",
+        Lang::De => "Projekt",
+        Lang::Fr => "Projet",
+        Lang::Pt => "Projeto",
+        Lang::Ar => "المشروع",
+        Lang::En => "Project",
+    }
+}
+
+pub fn task_summary_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "结论",
+        Lang::ZhTw => "結論",
+        Lang::Ja => "結論",
+        Lang::Ko => "결론",
+        Lang::Es => "Conclusión",
+        Lang::De => "Ergebnis",
+        Lang::Fr => "Conclusion",
+        Lang::Pt => "Conclusão",
+        Lang::Ar => "الخلاصة",
+        Lang::En => "Summary",
+    }
+}
+
+pub fn task_changes_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "改动",
+        Lang::ZhTw => "變更",
+        Lang::Ja => "変更",
+        Lang::Ko => "변경",
+        Lang::Es => "Cambios",
+        Lang::De => "Änderungen",
+        Lang::Fr => "Modifications",
+        Lang::Pt => "Alterações",
+        Lang::Ar => "التغييرات",
+        Lang::En => "Changes",
+    }
+}
+
+pub fn task_reason_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "原因",
+        Lang::ZhTw => "原因",
+        Lang::Ja => "理由",
+        Lang::Ko => "사유",
+        Lang::Es => "Motivo",
+        Lang::De => "Grund",
+        Lang::Fr => "Raison",
+        Lang::Pt => "Motivo",
+        Lang::Ar => "السبب",
+        Lang::En => "Reason",
+    }
+}
+
+pub fn task_link_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "会话",
+        Lang::ZhTw => "對話",
+        Lang::Ja => "セッション",
+        Lang::Ko => "세션",
+        Lang::Es => "Sesión",
+        Lang::De => "Sitzung",
+        Lang::Fr => "Session",
+        Lang::Pt => "Sessão",
+        Lang::Ar => "الجلسة",
+        Lang::En => "Session",
+    }
+}
+
+// Answering an agent question by replying to its push
+
+pub fn question_reply_sent(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "已提交回答。",
+        Lang::ZhTw => "已提交回答。",
+        Lang::Ja => "回答を送信しました。",
+        Lang::Ko => "답변을 보냈습니다.",
+        Lang::Es => "Respuesta enviada.",
+        Lang::De => "Antwort gesendet.",
+        Lang::Fr => "Réponse envoyée.",
+        Lang::Pt => "Resposta enviada.",
+        Lang::Ar => "تم إرسال الإجابة.",
+        Lang::En => "Answer sent.",
+    }
+}
+
+pub fn question_reply_deferred(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "已跳过，智能体会自己判断。",
+        Lang::ZhTw => "已略過，智慧代理會自行判斷。",
+        Lang::Ja => "スキップしました。エージェントが判断します。",
+        Lang::Ko => "건너뛰었습니다. 에이전트가 판단합니다.",
+        Lang::Es => "Omitida; el agente decidirá.",
+        Lang::De => "Übersprungen; der Agent entscheidet.",
+        Lang::Fr => "Ignorée ; l'agent décidera.",
+        Lang::Pt => "Ignorada; o agente decidirá.",
+        Lang::Ar => "تم التخطي؛ سيقرر الوكيل بنفسه.",
+        Lang::En => "Skipped; the agent will decide.",
+    }
+}
+
+pub fn question_reply_gone(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "这个问题已经回答过或已取消。",
+        Lang::ZhTw => "這個問題已經回答過或已取消。",
+        Lang::Ja => "この質問は回答済みか、取り消されました。",
+        Lang::Ko => "이 질문은 이미 답변되었거나 취소되었습니다.",
+        Lang::Es => "Esta pregunta ya fue respondida o cancelada.",
+        Lang::De => "Diese Frage wurde bereits beantwortet oder abgebrochen.",
+        Lang::Fr => "Cette question a déjà reçu une réponse ou a été annulée.",
+        Lang::Pt => "Esta pergunta já foi respondida ou cancelada.",
+        Lang::Ar => "تمت الإجابة على هذا السؤال أو أُلغي.",
+        Lang::En => "This question was already answered or canceled.",
+    }
+}
+
+pub fn question_reply_failed(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "提交回答失败：",
+        Lang::ZhTw => "提交回答失敗：",
+        Lang::Ja => "回答の送信に失敗しました: ",
+        Lang::Ko => "답변 전송 실패: ",
+        Lang::Es => "No se pudo enviar la respuesta: ",
+        Lang::De => "Antwort konnte nicht gesendet werden: ",
+        Lang::Fr => "Échec de l'envoi de la réponse : ",
+        Lang::Pt => "Falha ao enviar a resposta: ",
+        Lang::Ar => "تعذر إرسال الإجابة: ",
+        Lang::En => "Failed to send the answer: ",
     }
 }

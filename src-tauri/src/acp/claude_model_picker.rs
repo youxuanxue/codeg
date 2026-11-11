@@ -89,7 +89,27 @@ pub fn provider_ids(model_json: Option<&str>) -> Vec<String> {
 /// rows to add: `{"modelPicker": …}`, the user's own rows (from the
 /// `settings.json` of the Claude this env launches) first.
 pub fn launch_settings(runtime_env: &BTreeMap<String, String>) -> Option<Value> {
-    let ids = decode(runtime_env.get(LAUNCH_KEY)?);
+    launch_settings_with(runtime_env, &[])
+}
+
+/// [`launch_settings`] plus `extra_ids`, which follow the stored picker ids.
+/// Used for non-Claude models the cc-switch catalog contributes: Claude accepts
+/// a `set_config_option` only for a model its own picker lists, so those ids
+/// have to ride this `--settings` tier and not only the composer's list.
+pub fn launch_settings_with(
+    runtime_env: &BTreeMap<String, String>,
+    extra_ids: &[String],
+) -> Option<Value> {
+    let stored = runtime_env
+        .get(LAUNCH_KEY)
+        .map(|raw| decode(raw))
+        .unwrap_or_default();
+    let ids = normalize(
+        stored
+            .iter()
+            .map(String::as_str)
+            .chain(extra_ids.iter().map(String::as_str)),
+    );
     if ids.is_empty() {
         return None;
     }
@@ -214,6 +234,38 @@ mod tests {
         assert_eq!(
             launch_settings(&env),
             Some(json!({"modelPicker": {"options": [{"model": "mine"}, {"model": "glm-5.2"}]}}))
+        );
+    }
+
+    #[test]
+    fn extra_picker_ids_follow_the_stored_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"modelPicker":{"options":[{"model":"mine"}]}}"#,
+        )
+        .unwrap();
+        let mut env = BTreeMap::new();
+        env.insert(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        );
+        env.insert(LAUNCH_KEY.to_string(), encode(&ids(&["glm-5.2"])).unwrap());
+        let extra = ids(&["gpt-5.6", "glm-5.2", " gpt-6 "]);
+        assert_eq!(
+            launch_settings_with(&env, &extra),
+            Some(json!({"modelPicker": {"options": [
+                {"model": "mine"},
+                {"model": "glm-5.2"},
+                {"model": "gpt-5.6"},
+                {"model": "gpt-6"},
+            ]}}))
+        );
+        // Catalog rows alone still produce a picker, ahead of nothing stored.
+        env.remove(LAUNCH_KEY);
+        assert_eq!(
+            launch_settings_with(&env, &ids(&["gpt-5.6"])),
+            Some(json!({"modelPicker": {"options": [{"model": "mine"}, {"model": "gpt-5.6"}]}}))
         );
     }
 }

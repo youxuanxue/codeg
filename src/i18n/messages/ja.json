@@ -4590,6 +4590,8 @@
       "permissionRequestDesc": "エージェントが操作の権限を要求した時",
       "questionRequest": "エージェントからの質問",
       "questionRequestDesc": "エージェントが質問したとき",
+      "taskAttention": "タスクの対応待ち",
+      "taskAttentionDesc": "タスクがレビュー待ちになったとき、または失敗したとき",
       "userPromptSent": "ユーザーメッセージ",
       "userPromptSentDesc": "メッセージを送信したとき（通知に本文が含まれます）",
       "topLevelOnly": "トップレベルのセッションのみ",

@@ -129,6 +129,16 @@ impl ChatChannelManager {
         }
     }
 
+    /// The type of a connected channel, `None` when it is not connected.
+    pub async fn channel_type(&self, channel_id: i32) -> Option<ChannelType> {
+        self.inner
+            .channels
+            .lock()
+            .await
+            .get(&channel_id)
+            .map(|channel| channel.channel_type)
+    }
+
     pub async fn send_to_channel(
         &self,
         channel_id: i32,
@@ -362,6 +372,13 @@ impl ChatChannelManager {
             db_conn.clone(),
             bridge.clone(),
             conn_mgr.clone_ref(),
+        );
+
+        // Spawn work task attention pushes (review / failed)
+        super::event_subscriber::spawn_task_attention_subscriber(
+            broadcaster.clone(),
+            self.clone_ref(),
+            db_conn.clone(),
         );
 
         // Spawn session event subscriber (ACP event routing to channels)

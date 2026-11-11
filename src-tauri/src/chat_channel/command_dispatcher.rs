@@ -80,6 +80,15 @@ pub fn spawn_command_dispatcher(
         let mut config = CommandConfigCache::new();
 
         while let Some(cmd) = command_rx.recv().await {
+            // A group reply that does not mention the bot is let through only
+            // in case it answers a question push. Any other one is people
+            // talking to each other: dropped before it is logged, as a
+            // mention-less group message always was.
+            if super::question_reply::is_unaddressed_group_reply(&cmd)
+                && !super::question_reply::replies_to_tracked_question(&cmd).await
+            {
+                continue;
+            }
             let text = cmd.command_text.trim();
             tracing::info!(
                 "[ChatChannel] received command from channel={} sender={}: {:?}",
@@ -101,6 +110,23 @@ pub fn spawn_command_dispatcher(
             .await;
 
             config.refresh_if_needed(&db_conn).await;
+
+            // A reply to an agent's question push answers it; nothing else
+            // about the message matters.
+            if let Some(reply) =
+                super::question_reply::answer_reply(&cmd, &conn_mgr, config.lang).await
+            {
+                send_dispatch_message(
+                    &db_conn,
+                    &manager,
+                    cmd.channel_id,
+                    text,
+                    DispatchMessage::Rich(reply),
+                    cmd.target.clone(),
+                )
+                .await;
+                continue;
+            }
 
             let response = dispatch_command(
                 text,
@@ -276,6 +302,20 @@ async fn dispatch_command(
                     target,
                 );
             }
+            // A plain request starts a task: in the project it names, else in
+            // the folder already chosen. Help only when there is neither.
+            if session_commands::folder_for_plain_text(db, text, channel_id, sender_id)
+                .await
+                .is_some()
+            {
+                return task_response(
+                    session_commands::handle_task(
+                        db, text, channel_id, sender_id, target, manager, conn_mgr, emitter,
+                        bridge, lang, prefix, data_dir,
+                    )
+                    .await,
+                );
+            }
             return DispatchResponse::current(command_handlers::handle_help(prefix, lang), target);
         }
     };
@@ -341,23 +381,13 @@ async fn dispatch_command(
                 )
             }
         }
-        "task" | "do" => {
-            let result = session_commands::handle_task(
+        "task" | "do" => task_response(
+            session_commands::handle_task(
                 db, args, channel_id, sender_id, target, manager, conn_mgr, emitter, bridge, lang,
                 prefix, data_dir,
             )
-            .await;
-            DispatchResponse {
-                message: Some(DispatchMessage::Rich(result.message)),
-                target: result.response_target,
-                extra_messages: result
-                    .extra_responses
-                    .into_iter()
-                    .map(|(message, target)| (DispatchMessage::Rich(message), target))
-                    .collect(),
-                post_action: result.post_action,
-            }
-        }
+            .await,
+        ),
         "sessions" => DispatchResponse::current(
             session_commands::handle_sessions(db, channel_id, sender_id, target, lang, prefix)
                 .await,
@@ -447,6 +477,21 @@ impl DispatchResponse {
             extra_messages: Vec::new(),
             post_action: None,
         }
+    }
+}
+
+/// What a started task answers with: its first message, plus any the start
+/// produced (a topic created, a session announced).
+fn task_response(result: session_commands::CommandMessageResult) -> DispatchResponse {
+    DispatchResponse {
+        message: Some(DispatchMessage::Rich(result.message)),
+        target: result.response_target,
+        extra_messages: result
+            .extra_responses
+            .into_iter()
+            .map(|(message, target)| (DispatchMessage::Rich(message), target))
+            .collect(),
+        post_action: result.post_action,
     }
 }
 

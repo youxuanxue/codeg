@@ -127,14 +127,28 @@ pinned_pnpm() {
   echo "$v"
 }
 
+# Fallback for a pnpm step when the configured registry (a mirror in
+# ~/.npmrc, say) cannot serve pnpm or a package: the step runs again once
+# against the public registry. The user's npm config is left as it is. A step
+# that fails for any other reason fails again and stops the install.
+PUBLIC_REGISTRY=https://registry.npmjs.org
+
+with_registry_fallback() {
+  "$@" && return 0
+  echo "retrying against $PUBLIC_REGISTRY: $*" >&2
+  npm_config_registry=$PUBLIC_REGISTRY "$@"
+}
+
 cmd_install() {
   [ "$(uname -s)" = Darwin ] || die "launchd install is macOS-only"
   command -v cargo >/dev/null || die "cargo not found"
   command -v npx >/dev/null || die "npx not found"
 
   # Homebrew's pnpm can lag the pinned major and reject this workspace file.
-  (cd "$REPO" && npx -y "pnpm@$(pinned_pnpm)" install --frozen-lockfile \
-    && npx -y "pnpm@$(pinned_pnpm)" build)
+  local pnpm
+  pnpm="pnpm@$(pinned_pnpm)"
+  (cd "$REPO" && with_registry_fallback npx -y "$pnpm" install --frozen-lockfile \
+    && with_registry_fallback npx -y "$pnpm" build)
   (cd "$REPO/src-tauri" \
     && cargo build --release --no-default-features --features server-bin --bin codeg-server \
     && cargo build --release --no-default-features --features mcp-bin --bin codeg-mcp)
