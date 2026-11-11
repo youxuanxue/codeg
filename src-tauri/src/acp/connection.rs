@@ -2761,6 +2761,10 @@ pub async fn spawn_agent_connection(
         initial_state.claude_model_catalog =
             crate::commands::acp::cc_switch_claude_model_catalog(&runtime_env);
     }
+    if agent_type == AgentType::Codex {
+        initial_state.claude_model_catalog =
+            crate::commands::acp::cc_switch_codex_model_catalog(&runtime_env);
+    }
     if agent_type == AgentType::Gemini {
         initial_state.gemini_model_catalog =
             crate::commands::acp::cc_switch_gemini_model_catalog(&runtime_env);
@@ -4659,7 +4663,7 @@ async fn emit_config_options(
         )
     };
     let mut visible = visible_config_options(&pinned, config_options);
-    if agent_type == AgentType::ClaudeCode {
+    if matches!(agent_type, AgentType::ClaudeCode | AgentType::Codex) {
         merge_claude_model_catalog(&mut visible, &catalog);
     }
     let visible = match pi_enabled_model_patterns.as_deref() {
@@ -7013,7 +7017,7 @@ async fn apply_and_emit_session_config_options(
     initial_config_options: Vec<SessionConfigOption>,
 ) {
     let mut initial_config_options = initial_config_options;
-    if agent_type == AgentType::ClaudeCode {
+    if matches!(agent_type, AgentType::ClaudeCode | AgentType::Codex) {
         let catalog = state.read().await.claude_model_catalog.clone();
         merge_claude_model_catalog(&mut initial_config_options, &catalog);
     }
