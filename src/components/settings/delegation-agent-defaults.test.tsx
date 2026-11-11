@@ -799,4 +799,36 @@ describe("DelegationAgentDefaultsPanel agent picker and notices", () => {
     rerender(panel({}, () => {}, { delegationEnabled: true }))
     expect(screen.queryByText(/Multi-Agent Collaboration is off/)).toBeNull()
   })
+
+  it("shows standalone ACP modes alongside model options unless mode is already a config option", async () => {
+    const tag = unique()
+    describeAgentOptions.mockResolvedValue({
+      modes: {
+        current_mode_id: `yolo-${tag}`,
+        available_modes: [
+          { id: `default-${tag}`, name: "Default", description: null },
+          { id: `yolo-${tag}`, name: "YOLO", description: null },
+        ],
+      },
+      config_options: [
+        {
+          id: "model",
+          name: "Model",
+          description: null,
+          category: "model",
+          kind: {
+            type: "select",
+            current_value: `gemini-4-${tag}`,
+            options: [choice(`gemini-4-${tag}`, "gemini-4-argon")],
+            groups: [],
+          },
+        },
+      ],
+      available_commands: [],
+    })
+
+    render(panel({}))
+    await screen.findByRole("combobox", { name: "Mode" }, PROBED)
+    expect(optionRows()).toEqual(["Model", "Mode"])
+  })
 })

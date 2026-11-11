@@ -2761,6 +2761,10 @@ pub async fn spawn_agent_connection(
         initial_state.claude_model_catalog =
             crate::commands::acp::cc_switch_claude_model_catalog(&runtime_env);
     }
+    if agent_type == AgentType::Gemini {
+        initial_state.gemini_model_catalog =
+            crate::commands::acp::cc_switch_gemini_model_catalog(&runtime_env);
+    }
 
     // Install the SessionStarted dedup signal BEFORE wrapping into Arc so the
     // first event (StatusChanged{Connecting} below) doesn't race with the
@@ -5884,6 +5888,9 @@ async fn set_config_option_for_agent(
         AgentType::Hermes => {
             set_hermes_config_option(cx, session_id, state, emitter, config_id, value_id).await
         }
+        AgentType::Gemini => {
+            set_gemini_config_option(cx, session_id, state, emitter, config_id, value_id).await
+        }
         _ => set_session_config_option(cx, session_id, state, emitter, config_id, value_id).await,
     }
 }
@@ -6316,6 +6323,176 @@ async fn set_hermes_config_option(
             SetterOutcome::Confirmed {
                 current: value_id.clone(),
             }
+        }
+        _ => {
+            return set_session_config_option(cx, session_id, state, emitter, config_id, value_id)
+                .await
+        }
+    };
+    update_emitted_option(state, emitter, &config_id, &value_id).await;
+    Ok(outcome)
+}
+
+/// Gemini CLI's synthesized model selector id.
+const GEMINI_MODEL_OPTION_ID: &str = MODEL_CONFIG_OPTION_ID;
+
+/// Build Gemini CLI's model selector from the session reply's legacy `models`
+/// (`{"currentModelId", "availableModels"}`) plus any models contributed by the
+/// cc-switch provider catalog (`~/.pi/agent/models.json` matched against
+/// `GOOGLE_GEMINI_BASE_URL` / `~/.gemini/.env`).
+///
+/// When `currentModelId` names a custom model from `GEMINI_MODEL` that is in
+/// neither Gemini CLI's hardcoded `availableModels` nor `catalog`, keep it in
+/// the built-in list so the selector reflects the model the session actually
+/// runs instead of falling back to `auto`.
+fn synthesize_gemini_model_option(
+    models: Option<&serde_json::Value>,
+    catalog: &[(String, String, Option<String>)],
+) -> Option<SessionConfigOptionInfo> {
+    let mut seen = HashSet::new();
+    let mut built_in: Vec<SessionConfigSelectOptionInfo> = models
+        .and_then(|m| m.get("availableModels"))
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|model| {
+                    let id = model.get("modelId")?.as_str()?.trim();
+                    if id.is_empty() || !seen.insert(id.to_string()) {
+                        return None;
+                    }
+                    let name = model
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(id);
+                    Some(SessionConfigSelectOptionInfo {
+                        value: id.to_string(),
+                        name: name.to_string(),
+                        description: model
+                            .get("description")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let current_model_id = models
+        .and_then(|m| m.get("currentModelId"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
+    let cc_switch_options: Vec<SessionConfigSelectOptionInfo> = catalog
+        .iter()
+        .filter_map(|(id, name, description)| {
+            let trimmed = id.trim();
+            if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+                return None;
+            }
+            Some(SessionConfigSelectOptionInfo {
+                value: trimmed.to_string(),
+                name: name.clone(),
+                description: description.clone(),
+            })
+        })
+        .collect();
+
+    if let Some(current) = current_model_id {
+        if seen.insert(current.to_string()) {
+            built_in.push(SessionConfigSelectOptionInfo {
+                value: current.to_string(),
+                name: current.to_string(),
+                description: None,
+            });
+        }
+    }
+
+    if built_in.is_empty() && cc_switch_options.is_empty() {
+        return None;
+    }
+
+    let mut options = Vec::with_capacity(built_in.len() + cc_switch_options.len());
+    options.extend(built_in.iter().cloned());
+    options.extend(cc_switch_options.iter().cloned());
+
+    let groups = if cc_switch_options.is_empty() {
+        Vec::new()
+    } else if built_in.is_empty() {
+        vec![SessionConfigSelectGroupInfo {
+            group: "cc-switch".to_string(),
+            name: "cc-switch provider".to_string(),
+            options: cc_switch_options,
+        }]
+    } else {
+        vec![
+            SessionConfigSelectGroupInfo {
+                group: "built-in".to_string(),
+                name: "Built-in".to_string(),
+                options: built_in,
+            },
+            SessionConfigSelectGroupInfo {
+                group: "cc-switch".to_string(),
+                name: "cc-switch provider".to_string(),
+                options: cc_switch_options,
+            },
+        ]
+    };
+
+    let current_value = current_model_id
+        .filter(|current| options.iter().any(|o| o.value == *current))
+        .map(str::to_string)
+        .unwrap_or_else(|| options[0].value.clone());
+
+    Some(SessionConfigOptionInfo {
+        id: GEMINI_MODEL_OPTION_ID.to_string(),
+        name: "Model".to_string(),
+        description: None,
+        category: Some("model".to_string()),
+        kind: SessionConfigKindInfo::Select(SessionConfigSelectInfo {
+            current_value,
+            options,
+            groups,
+        }),
+        recommended_value: None,
+    })
+}
+
+/// On connect, re-apply the model the user last picked for Gemini CLI via
+/// `session/set_model` when it differs from what the session started on and is
+/// still offered.
+async fn apply_gemini_preferred_options(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    opts: &mut [SessionConfigOptionInfo],
+    preferred_model: Option<&str>,
+) {
+    if let Some(pref) =
+        preferred_model.filter(|pref| select_offers_other(opts, GEMINI_MODEL_OPTION_ID, pref))
+    {
+        match set_legacy_session_model(cx, session_id, pref).await {
+            Ok(()) => set_select_current(opts, GEMINI_MODEL_OPTION_ID, pref),
+            Err(e) => tracing::error!("[ACP] failed to apply preferred gemini model '{pref}': {e}"),
+        }
+    }
+}
+
+/// Apply a composer selector change for Gemini CLI: `model` via
+/// `session/set_model`, anything else on the shared config-option path.
+async fn set_gemini_config_option(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    state: &Arc<RwLock<SessionState>>,
+    emitter: &EventEmitter,
+    config_id: String,
+    value_id: String,
+) -> Result<SetterOutcome, agent_client_protocol::Error> {
+    let outcome = match config_id.as_str() {
+        GEMINI_MODEL_OPTION_ID => {
+            set_legacy_session_model(cx, session_id, &value_id).await?;
+            SetterOutcome::Accepted
         }
         _ => {
             return set_session_config_option(cx, session_id, state, emitter, config_id, value_id)
@@ -7032,6 +7209,55 @@ async fn apply_and_emit_session_config_options(
         }
         // No model listed at all: the standard path, legacy mode selector
         // included.
+    }
+    if agent_type == AgentType::Gemini {
+        let catalog = state.read().await.gemini_model_catalog.clone();
+        if let Some(model) = synthesize_gemini_model_option(session_models, &catalog) {
+            let standard_prefs: BTreeMap<String, String> = preferred_config_values
+                .iter()
+                .filter(|(id, _)| id.as_str() != GEMINI_MODEL_OPTION_ID)
+                .map(|(id, value)| (id.clone(), value.clone()))
+                .collect();
+            let mut agent_chosen =
+                current_config_option_values(&map_session_config_options(&initial_config_options));
+            let updated = apply_preferred_session_options(
+                cx,
+                session,
+                state,
+                emitter,
+                preferred_mode_id,
+                &standard_prefs,
+                session_models,
+                initial_config_options,
+            )
+            .await;
+            let session_id = session.session_id().clone();
+            let mut synthesized = vec![model];
+            agent_chosen.extend(current_config_option_values(&synthesized));
+            state.write().await.agent_chosen_config_values = agent_chosen;
+            apply_gemini_preferred_options(
+                cx,
+                &session_id,
+                &mut synthesized,
+                preferred_config_values
+                    .get(GEMINI_MODEL_OPTION_ID)
+                    .map(String::as_str),
+            )
+            .await;
+            let pinned = state.read().await.env_pinned_config_option_ids.clone();
+            let mut infos = map_session_config_options(&visible_config_options(&pinned, updated));
+            infos.retain(|o| o.id != GEMINI_MODEL_OPTION_ID);
+            synthesized.extend(infos);
+            emit_with_state(
+                state,
+                emitter,
+                AcpEvent::SessionConfigOptions {
+                    config_options: synthesized,
+                },
+            )
+            .await;
+            return;
+        }
     }
     // What the agent picked on its own, read before the replay below rewrites
     // any of it (see `SessionState::agent_chosen_config_values`).
@@ -9649,7 +9875,10 @@ async fn run_connection(
                         mcp_servers.clone(),
                         &claude,
                     );
-                    if matches!(agent_type, AgentType::Kiro | AgentType::Hermes) {
+                    if matches!(
+                        agent_type,
+                        AgentType::Kiro | AgentType::Hermes | AgentType::Gemini
+                    ) {
                         unless_cancelled(
                             &handshake,
                             send_capturing_models::<LoadSessionResponse>(
@@ -23979,6 +24208,176 @@ mod hermes_selector_tests {
         assert_eq!(
             select(&opts[0]).groups,
             select(&codeg_hermes_selectors()[0]).groups
+        );
+    }
+
+    fn gemini_models(current: &str) -> serde_json::Value {
+        serde_json::json!({
+            "currentModelId": current,
+            "availableModels": [
+                {
+                    "modelId": "auto",
+                    "name": "Auto (Gemini 2.5)",
+                    "description": "Let Gemini CLI decide the best model for the task"
+                },
+                {
+                    "modelId": "gemini-2.5-pro",
+                    "name": "gemini-2.5-pro",
+                    "description": "Pro model"
+                },
+                {
+                    "modelId": "gemini-2.5-flash",
+                    "name": "gemini-2.5-flash",
+                    "description": "Flash model"
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn gemini_models_and_cc_switch_catalog_merge_into_grouped_selector() {
+        let catalog = vec![
+            (
+                "gemini-4-argon".to_string(),
+                "gemini-4-argon".to_string(),
+                Some("cc-switch provider catalog".to_string()),
+            ),
+            (
+                "gemini-2.5-pro".to_string(),
+                "gemini-2.5-pro".to_string(),
+                Some("cc-switch provider catalog".to_string()),
+            ),
+            (
+                "gpt-6".to_string(),
+                "gpt-6".to_string(),
+                Some("cc-switch provider catalog".to_string()),
+            ),
+        ];
+        let option =
+            synthesize_gemini_model_option(Some(&gemini_models("gemini-4-argon")), &catalog)
+                .expect("selector");
+        assert_eq!(option.id, "model");
+        assert_eq!(option.category.as_deref(), Some("model"));
+        let sel = select(&option);
+        assert_eq!(
+            sel.current_value, "gemini-4-argon",
+            "currentModelId from GEMINI_MODEL matches the cc-switch catalog entry"
+        );
+        assert_eq!(sel.groups.len(), 2);
+        assert_eq!(sel.groups[0].group, "built-in");
+        assert_eq!(
+            sel.groups[0]
+                .options
+                .iter()
+                .map(|o| o.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["auto", "gemini-2.5-pro", "gemini-2.5-flash"]
+        );
+        assert_eq!(sel.groups[1].group, "cc-switch");
+        assert_eq!(
+            sel.groups[1]
+                .options
+                .iter()
+                .map(|o| o.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gemini-4-argon", "gpt-6"],
+            "duplicates already in built-in are skipped"
+        );
+    }
+
+    #[test]
+    fn gemini_custom_current_model_without_catalog_stays_selectable() {
+        let option =
+            synthesize_gemini_model_option(Some(&gemini_models("gemini-custom-exp")), &[])
+                .expect("selector");
+        let sel = select(&option);
+        assert_eq!(sel.current_value, "gemini-custom-exp");
+        assert!(sel.groups.is_empty());
+        assert!(sel.options.iter().any(|o| o.value == "gemini-custom-exp"));
+    }
+
+    #[tokio::test]
+    async fn gemini_session_restores_saved_model_and_switches_via_set_model() {
+        let log: Log = Arc::default();
+        let (client_end, agent_end) = Channel::duplex();
+        let agent = fake_hermes(agent_end, &log, false, false);
+        let mut raw_state = SessionState::new(
+            "conn-gemini".to_string(),
+            AgentType::Gemini,
+            None,
+            "win".to_string(),
+            None,
+        );
+        raw_state.gemini_model_catalog = vec![(
+            "gemini-4-argon".to_string(),
+            "gemini-4-argon".to_string(),
+            Some("cc-switch provider catalog".to_string()),
+        )];
+        let state = Arc::new(RwLock::new(raw_state));
+        let establishment_state = Arc::clone(&state);
+        let prefs = BTreeMap::from([("model".to_string(), "gemini-2.5-pro".to_string())]);
+        Client
+            .builder()
+            .connect_with(client_end, async move |cx: ConnectionTo<Agent>| {
+                let response = NewSessionResponse::new(SessionId::new("s1")).modes(hermes_modes());
+                let mut session = AgentSession::attach(&cx, response)?;
+                apply_and_emit_session_config_options(
+                    &cx,
+                    &mut session,
+                    &establishment_state,
+                    &EventEmitter::Noop,
+                    AgentType::Gemini,
+                    None,
+                    None,
+                    Some(&gemini_models("gemini-4-argon")),
+                    Some("dont_ask"),
+                    &prefs,
+                    Vec::new(),
+                )
+                .await;
+                let outcome = set_config_option_for_agent(
+                    AgentType::Gemini,
+                    &cx,
+                    &SessionId::new("s1"),
+                    &establishment_state,
+                    &EventEmitter::Noop,
+                    "model".to_string(),
+                    "gemini-4-argon".to_string(),
+                )
+                .await
+                .expect("switch model");
+                assert_eq!(outcome, SetterOutcome::Accepted);
+                Ok(())
+            })
+            .await
+            .expect("establishment and switch");
+        agent.abort();
+        let sent = log.lock().unwrap().clone();
+        assert_eq!(
+            sent,
+            [
+                (
+                    "set_mode",
+                    serde_json::json!({"sessionId": "s1", "modeId": "dont_ask"})
+                ),
+                (
+                    "set_model",
+                    serde_json::json!({"sessionId": "s1", "modelId": "gemini-2.5-pro"})
+                ),
+                (
+                    "set_model",
+                    serde_json::json!({"sessionId": "s1", "modelId": "gemini-4-argon"})
+                ),
+            ]
+        );
+        let guard = state.read().await;
+        assert_eq!(
+            current(&guard).get("model").map(String::as_str),
+            Some("gemini-4-argon")
+        );
+        assert_eq!(
+            guard.agent_chosen_config_values.get("model").map(String::as_str),
+            Some("gemini-4-argon")
         );
     }
 }
