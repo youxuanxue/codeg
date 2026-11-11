@@ -28,7 +28,7 @@ Agent 自己处理能处理的事，只在需要人拍板时找人；人在飞�
 
 - **D1 运行位置**（2026-11-02）：本机兼任 worker，codeg 以 `codeg-server` 运行，由 `scripts/local-deploy.sh install` 安装成 launchd 用户服务（`com.codeg.server`）。不部署公网服务器。
 - **D2 只在需要人时推送**（2026-11-09）：推送给人的事件限定为五类：任务进入 review、任务失败、Agent 提问、权限请求、出错。其余进度不推送。
-- **D3 人在飞书上回应**（2026-11-09、2026-11-10，用户：「同意。继续」）：飞书不只是出站通知。回复提问卡片即作答；@ 机器人说一句话即开任务。
+- **D3 人在飞书上回应**：飞书不只是出站通知。回复提问卡片即作答（2026-11-09）；@ 机器人说一句话即开任务（2026-11-10，用户：「同意。继续」）。
 - **D4 低风险 PR 由 Agent 合并**（2026-11-11，用户：「低风险 PR 由 Agent 自动执行。同意。」「私有仓库也是低风险 PR 由 Agent 自动执行。只是没有 GitHub 硬拦截而已。」）：Agent 合并的唯一入口是 dev-rules 的 `auto-merge-low-risk`；常规和高风险 PR 由人合并。
 - **D5 公开仓库开分支保护**（2026-11-10，用户：「先把本机 codes 里面最近一个月有更新的公开仓库，都打开这个 ci 全绿才能合并 pr 的约束。」）：CI 未全绿的 PR 由 GitHub 拒绝合并。
 - **D6 决策台账**（2026-11-09）：已定的事不问第二遍，规则在 dev-rules `rules/product-dev.mdc`「决策台账」。
@@ -63,7 +63,7 @@ Agent 自己处理能处理的事，只在需要人拍板时找人；人在飞�
 
 ### 合并
 
-- **分支保护**（2026-11-10）：codeg（11 项必需检查）、cc-switch（3 项）已开启，sub2api 原本就有。三者均允许 auto-merge、合并后删除分支，不要求人工审批，管理员可绕过（`enforce_admins=false`，与 sub2api 一致）。dev-rules 没有 CI，不开必需检查。私有仓库（zhifu、fde、science-core、agent-skills、infra-skills、agent-hub-config）在免费账号下开不了分支保护。
+- **分支保护**（2026-11-10）：codeg（11 项必需检查）、cc-switch（3 项）已开启，sub2api 原本就有（9 项，要求走 PR、审批数为 0）。三者均允许 auto-merge、合并后删除分支，不需要人工批准，管理员可绕过（`enforce_admins=false`）。dev-rules 没有 CI，不开必需检查。私有仓库（zhifu、fde、science-core、agent-skills、infra-skills、agent-hub-config）在免费账号下开不了分支保护。
 - **`auto-merge-low-risk <PR号>`**（dev-rules `global/bin`，dev-rules PR #117）：以下条件全部满足才合并，否则打印原因、留给人：
   1. PR 打开、非草稿、目标为默认分支、无冲突；
   2. 带 `risk:low` 标签，且没有 `risk:normal` / `risk:high`；
