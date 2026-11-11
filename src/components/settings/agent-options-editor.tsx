@@ -115,10 +115,9 @@ export function findModelRow(rows: readonly OptionRow[]): OptionRow | null {
  * it is picked then land below it, instead of pushing it down under the
  * pointer.
  *
- * The standalone mode row only appears when the agent advertises modes and NO
- * config options — the chat composer's rule (`message-input.tsx`): agents that
- * have both expose the mode as one of the config options, and a second "Mode"
- * row would duplicate it.
+ * The standalone mode row appears when the agent advertises ACP modes and does
+ * not already expose a `mode`-category config option — matching the chat
+ * composer (`message-input.tsx`) and automation config (`agent-config-section.tsx`).
  */
 export function buildOptionRows(
   snapshot: AgentOptionsSnapshot,

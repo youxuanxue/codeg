@@ -11904,11 +11904,11 @@ pub(crate) fn is_claude_catalog_id(id: &str) -> bool {
 }
 
 fn normalize_catalog_url(value: &str) -> String {
-    value
-        .trim()
-        .trim_end_matches('/')
-        .strip_suffix("/v1")
-        .unwrap_or_else(|| value.trim().trim_end_matches('/'))
+    let trimmed = value.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix("/v1beta")
+        .or_else(|| trimmed.strip_suffix("/v1"))
+        .unwrap_or(trimmed)
         .trim_end_matches('/')
         .to_string()
 }
@@ -25000,6 +25000,71 @@ model = "gpt"
                 "gpt-6",
             ]
         );
+    }
+
+    #[test]
+    fn cc_switch_gemini_model_catalog_normalizes_v1beta_and_filters_openai_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("models.json"),
+            serde_json::json!({
+                "providers": {
+                    "openai-proxy": {
+                        "baseUrl": "https://gw.example/v1beta/",
+                        "api": "openai-completions",
+                        "apiKey": "sk-gem",
+                        "models": [
+                            {"id": "google/gemini-3-flash", "name": "Gemini 3 Flash"},
+                            {"id": "gpt-6", "name": "GPT-6"}
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write models.json");
+
+        let mut env = BTreeMap::new();
+        env.insert(
+            "PI_CODING_AGENT_DIR".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        );
+        env.insert(
+            "GOOGLE_GEMINI_BASE_URL".to_string(),
+            "https://gw.example".to_string(),
+        );
+        env.insert("GEMINI_API_KEY".to_string(), "sk-gem".to_string());
+
+        let rows = cc_switch_gemini_model_catalog(&env);
+        let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["google/gemini-3-flash"],
+            "an explicit OpenAI provider only contributes Gemini model ids"
+        );
+    }
+
+    #[test]
+    fn gemini_fingerprint_tracks_dotenv_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gemini_dir = dir.path().join(".gemini");
+        std::fs::create_dir_all(&gemini_dir).expect("create .gemini");
+        let mut env = BTreeMap::new();
+        env.insert(
+            "GEMINI_CLI_HOME".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        );
+
+        let empty_fp = fingerprint_config(AgentType::Gemini, &env);
+        std::fs::write(gemini_dir.join(".env"), "GEMINI_MODEL=gemini-3-flash\n")
+            .expect("write first .env");
+        let first_fp = fingerprint_config(AgentType::Gemini, &env);
+        assert_ne!(empty_fp, first_fp);
+
+        std::fs::write(gemini_dir.join(".env"), "GEMINI_MODEL=gemini-4-argon\n")
+            .expect("write second .env");
+        let second_fp = fingerprint_config(AgentType::Gemini, &env);
+        assert_ne!(first_fp, second_fp);
     }
 
     #[tokio::test]
