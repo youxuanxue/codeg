@@ -11673,7 +11673,55 @@ pub(crate) fn cc_switch_claude_model_catalog(
     let base_url = runtime_env
         .get("ANTHROPIC_BASE_URL")
         .map(|value| normalize_catalog_url(value));
-    let api_key = runtime_env.get("ANTHROPIC_AUTH_TOKEN");
+    let api_key = runtime_env.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str);
+    cc_switch_model_catalog_for(
+        runtime_env,
+        base_url,
+        api_key,
+        provider_serves_claude_protocol,
+        claude_picker_catalog_id,
+    )
+}
+
+/// Model ids from the cc-switch unified Pi catalog that backs Gemini CLI's
+/// active provider credentials (`GOOGLE_GEMINI_BASE_URL` / `GEMINI_API_KEY`).
+///
+/// Unlike Claude Code (whose cc-switch credentials live under `"env"` in
+/// `~/.claude/settings.json`), cc-switch writes Gemini CLI's endpoint, key, and
+/// default model to `~/.gemini/.env`, which `gemini-cli` loads natively on
+/// startup. Fall back to that `.env` when `runtime_env` does not override the
+/// keys directly.
+pub(crate) fn cc_switch_gemini_model_catalog(
+    runtime_env: &BTreeMap<String, String>,
+) -> Vec<(String, String, Option<String>)> {
+    let dotenv = load_gemini_dotenv_raw(runtime_env)
+        .map(|raw| parse_dotenv_vars(&raw))
+        .unwrap_or_default();
+    let resolve = |key: &str| -> Option<String> {
+        runtime_env
+            .get(key)
+            .or_else(|| dotenv.get(key))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let base_url = resolve("GOOGLE_GEMINI_BASE_URL").map(|value| normalize_catalog_url(&value));
+    let api_key = resolve("GEMINI_API_KEY");
+    cc_switch_model_catalog_for(
+        runtime_env,
+        base_url,
+        api_key.as_deref(),
+        provider_serves_gemini_gateway,
+        gemini_picker_catalog_id,
+    )
+}
+
+fn cc_switch_model_catalog_for(
+    runtime_env: &BTreeMap<String, String>,
+    base_url: Option<String>,
+    api_key: Option<&str>,
+    serves_gateway: fn(&serde_json::Value) -> bool,
+    keep_model_id: fn(&str, bool) -> bool,
+) -> Vec<(String, String, Option<String>)> {
     let Some(base_url) = base_url.filter(|value| !value.is_empty()) else {
         return Vec::new();
     };
@@ -11730,12 +11778,12 @@ pub(crate) fn cc_switch_claude_model_catalog(
         let Some(models) = provider.get("models").and_then(serde_json::Value::as_array) else {
             continue;
         };
-        let anthropic_gateway = provider_serves_claude_protocol(provider);
+        let gateway = serves_gateway(provider);
         for model in models {
             let Some(id) = model.get("id").and_then(serde_json::Value::as_str) else {
                 continue;
             };
-            if !claude_picker_catalog_id(id, anthropic_gateway) {
+            if !keep_model_id(id, gateway) {
                 continue;
             }
             let name = model
@@ -11754,6 +11802,44 @@ pub(crate) fn cc_switch_claude_model_catalog(
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     rows.dedup_by(|a, b| a.0 == b.0);
     rows
+}
+
+fn load_gemini_dotenv_raw(runtime_env: &BTreeMap<String, String>) -> Option<String> {
+    let env = crate::parsers::AgentEnv::from_overrides(runtime_env.clone());
+    let path = crate::parsers::gemini::resolve_gemini_base_dir_for_env(&env).join(".env");
+    std::fs::read_to_string(path).ok()
+}
+
+fn parse_dotenv_vars(raw: &str) -> BTreeMap<String, String> {
+    let mut vars = BTreeMap::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let body = trimmed
+            .strip_prefix("export ")
+            .map(str::trim_start)
+            .unwrap_or(trimmed);
+        let Some((key, value)) = body.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        let unquoted = if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        vars.insert(key.to_string(), unquoted.to_string());
+    }
+    vars
 }
 
 /// Whether `provider` is called with Claude's messages API. A missing `api`
@@ -11776,6 +11862,38 @@ fn provider_serves_claude_protocol(provider: &serde_json::Value) -> bool {
 /// not need it; every other id does, and none of those are classified further.
 fn claude_picker_catalog_id(id: &str, anthropic_gateway: bool) -> bool {
     is_claude_catalog_id(id) || anthropic_gateway
+}
+
+/// Whether `provider` backs a Gemini or universal cc-switch gateway. cc-switch
+/// stores universal providers (such as TokenKey Fullkey) under
+/// `"api": "anthropic-messages"` in Pi's `models.json` while simultaneously
+/// routing `GOOGLE_GEMINI_BASE_URL` to the same gateway. An explicit OpenAI-only
+/// provider keeps only its Gemini ids.
+fn provider_serves_gemini_gateway(provider: &serde_json::Value) -> bool {
+    match provider
+        .get("api")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    {
+        None | Some("") => true,
+        Some(
+            "google-generative-ai"
+            | "google"
+            | "gemini"
+            | "anthropic-messages"
+            | "anthropic",
+        ) => true,
+        Some(_) => false,
+    }
+}
+
+fn gemini_picker_catalog_id(id: &str, gemini_gateway: bool) -> bool {
+    is_gemini_catalog_id(id) || gemini_gateway
+}
+
+fn is_gemini_catalog_id(id: &str) -> bool {
+    let leaf = id.rsplit(['/', ':']).next().unwrap_or(id);
+    leaf.starts_with("gemini-")
 }
 
 /// A Claude model id, including a Bedrock-style `….anthropic.claude-…` spelling.
@@ -12481,6 +12599,15 @@ pub(crate) fn fingerprint_config(
             &mut hasher,
             &pi_agent_dir_for_env(runtime_env),
         );
+    }
+    // Gemini CLI loads `~/.gemini/.env` (where cc-switch writes
+    // `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY`, and `GEMINI_MODEL`) at
+    // process start.
+    if agent_type == AgentType::Gemini {
+        hasher.update(b"\x01gemini_dotenv\x01");
+        if let Some(dotenv) = load_gemini_dotenv_raw(runtime_env) {
+            hasher.update(dotenv.as_bytes());
+        }
     }
     format!("{:x}", hasher.finalize())
 }
@@ -24806,6 +24933,72 @@ model = "gpt"
             ids,
             vec!["claude-opus-5-5", "gpt-5.6", "kimi-k2.6"],
             "a provider with no api still speaks the Anthropic endpoint it matched"
+        );
+    }
+
+    #[test]
+    fn cc_switch_gemini_model_catalog_reads_gemini_dotenv_and_universal_gateway() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pi_dir = dir.path().join("pi");
+        let gemini_home = dir.path().join("home");
+        let gemini_dir = gemini_home.join(".gemini");
+        std::fs::create_dir_all(&pi_dir).expect("create pi dir");
+        std::fs::create_dir_all(&gemini_dir).expect("create gemini dir");
+        std::fs::write(
+            pi_dir.join("models.json"),
+            serde_json::json!({
+                "providers": {
+                    "universal-pi-tokenkey-fullkey": {
+                        "name": "TokenKey Fullkey",
+                        "baseUrl": "https://api.tokenkey.dev",
+                        "api": "anthropic-messages",
+                        "apiKey": "sk-tokenkey",
+                        "models": [
+                            {"id": "gemini-4-argon", "name": "gemini-4-argon"},
+                            {"id": "gemini-3.8-flash", "name": "gemini-3.8-flash"},
+                            {"id": "claude-opus-5-5", "name": "claude-opus-5-5"},
+                            {"id": "gpt-6", "name": "gpt-6"}
+                        ]
+                    },
+                    "other": {
+                        "baseUrl": "https://api.tokenkey.dev",
+                        "api": "anthropic-messages",
+                        "apiKey": "sk-other",
+                        "models": [
+                            {"id": "gemini-2.5-pro", "name": "other"}
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write models.json");
+        std::fs::write(
+            gemini_dir.join(".env"),
+            "GOOGLE_GEMINI_BASE_URL=https://api.tokenkey.dev\nGEMINI_API_KEY=\"sk-tokenkey\"\nGEMINI_MODEL=gemini-4-argon\n",
+        )
+        .expect("write .env");
+
+        let mut env = BTreeMap::new();
+        env.insert(
+            "PI_CODING_AGENT_DIR".to_string(),
+            pi_dir.to_string_lossy().to_string(),
+        );
+        env.insert(
+            "GEMINI_CLI_HOME".to_string(),
+            gemini_home.to_string_lossy().to_string(),
+        );
+
+        let rows = cc_switch_gemini_model_catalog(&env);
+        let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "claude-opus-5-5",
+                "gemini-3.8-flash",
+                "gemini-4-argon",
+                "gpt-6",
+            ]
         );
     }
 

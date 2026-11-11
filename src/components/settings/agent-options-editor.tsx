@@ -38,6 +38,7 @@ import {
   modelListGroups,
   type ModelOptionGroup,
 } from "@/lib/model-config-groups"
+import { hasConfigModeOption } from "@/lib/session-settings"
 import type {
   AcpAgentInfo,
   AgentOptionsSnapshot,
@@ -124,9 +125,12 @@ export function buildOptionRows(
   vocabulary: Vocabulary
 ): OptionRow[] {
   const modes = snapshot.modes?.available_modes ?? []
-  const hasOptions = snapshot.config_options.length > 0
   const rows: OptionRow[] = []
-  if (modes.length > 0 && !hasOptions && snapshot.modes) {
+  if (
+    modes.length > 0 &&
+    !hasConfigModeOption(snapshot.config_options) &&
+    snapshot.modes
+  ) {
     rows.push({
       kind: "mode",
       id: MODE_ROW_ID,

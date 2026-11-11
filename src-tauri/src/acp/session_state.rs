@@ -380,6 +380,10 @@ pub struct SessionState {
     /// advertises family aliases. Non-Claude ids are also sent in the launch
     /// `modelPicker`, which is what makes the adapter accept them.
     pub claude_model_catalog: Vec<(String, String, Option<String>)>,
+    /// Model ids supplied by the cc-switch unified provider catalog for Gemini
+    /// CLI (`GOOGLE_GEMINI_BASE_URL` / `~/.gemini/.env`), merged into Gemini's
+    /// synthesized ACP model selector at establishment.
+    pub gemini_model_catalog: Vec<(String, String, Option<String>)>,
     /// Grok only: per-model reasoning-effort specs, parsed from the top-level
     /// `models` of the session-establishment response (guaranteed on
     /// `session/new`; opportunistic on resume/fork) and refreshed by each model
@@ -926,6 +930,7 @@ impl SessionState {
             current_mode: None,
             config_options: None,
             claude_model_catalog: Vec::new(),
+            gemini_model_catalog: Vec::new(),
             grok_model_specs: None,
             grok_catalog_broadcast: None,
             kiro_reasoning: None,
