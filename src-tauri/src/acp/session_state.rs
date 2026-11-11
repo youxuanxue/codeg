@@ -373,12 +373,12 @@ pub struct SessionState {
     pub current_mode: Option<String>,
     pub config_options: Option<Vec<SessionConfigOptionInfo>>,
     /// Model ids supplied by the cc-switch unified provider catalog: Claude ids,
-    /// and GPT chat ids when the gateway speaks the Anthropic messages API.
+    /// and every other id when the gateway speaks the Anthropic messages API.
     /// These are merged into Claude's ACP model selector at establishment so
-    /// a gateway's real catalog (for example `claude-opus-5-5`, `gpt-5.6`)
-    /// remains selectable even when the adapter only advertises family aliases.
-    /// GPT ids are also sent in the launch `modelPicker`, which is what makes
-    /// the adapter accept them.
+    /// a gateway's real catalog (for example `claude-opus-5-5`, `gpt-5.6`,
+    /// `deepseek-v4-pro`) remains selectable even when the adapter only
+    /// advertises family aliases. Non-Claude ids are also sent in the launch
+    /// `modelPicker`, which is what makes the adapter accept them.
     pub claude_model_catalog: Vec<(String, String, Option<String>)>,
     /// Grok only: per-model reasoning-effort specs, parsed from the top-level
     /// `models` of the session-establishment response (guaranteed on

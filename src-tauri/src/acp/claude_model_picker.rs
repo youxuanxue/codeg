@@ -93,7 +93,7 @@ pub fn launch_settings(runtime_env: &BTreeMap<String, String>) -> Option<Value> 
 }
 
 /// [`launch_settings`] plus `extra_ids`, which follow the stored picker ids.
-/// Used for GPT chat models the cc-switch catalog contributes: Claude accepts
+/// Used for non-Claude models the cc-switch catalog contributes: Claude accepts
 /// a `set_config_option` only for a model its own picker lists, so those ids
 /// have to ride this `--settings` tier and not only the composer's list.
 pub fn launch_settings_with(

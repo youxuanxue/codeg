@@ -11663,10 +11663,10 @@ pub(crate) fn build_runtime_env_from_setting(
 /// endpoint and key prevents another gateway's models from leaking into the
 /// Claude picker when several providers are configured.
 ///
-/// Claude ids are always kept. GPT chat ids (`gpt-5.6`, `gpt-6-sol`, …) are
-/// kept when that provider speaks the Anthropic messages API, which is how a
-/// gateway such as tokenkey serves them to Claude Code. Image and other media
-/// ids (`gpt-image-*`) are not chat models and stay out.
+/// Claude ids are always kept. Every other id is kept when that provider
+/// speaks the Anthropic messages API, which is how a gateway such as tokenkey
+/// serves GPT, DeepSeek, Gemini, GLM, Kimi, Qwen, and the rest of one catalog
+/// to Claude Code. The picker does not classify those ids by vendor or modality.
 pub(crate) fn cc_switch_claude_model_catalog(
     runtime_env: &BTreeMap<String, String>,
 ) -> Vec<(String, String, Option<String>)> {
@@ -11758,7 +11758,7 @@ pub(crate) fn cc_switch_claude_model_catalog(
 
 /// Whether `provider` is called with Claude's messages API. A missing `api`
 /// still counts: the caller already matched `ANTHROPIC_BASE_URL`. An explicit
-/// OpenAI protocol does not, so its GPT ids stay on the OpenAI client.
+/// OpenAI protocol does not, so its non-Claude ids stay on that client.
 fn provider_serves_claude_protocol(provider: &serde_json::Value) -> bool {
     match provider
         .get("api")
@@ -11772,24 +11772,17 @@ fn provider_serves_claude_protocol(provider: &serde_json::Value) -> bool {
 }
 
 /// A catalog id Claude's picker can offer. `anthropic_gateway` is the
-/// provider's protocol ([`provider_serves_claude_protocol`]); GPT chat ids
-/// need it, Claude ids do not.
+/// provider's protocol ([`provider_serves_claude_protocol`]). Claude ids do
+/// not need it; every other id does, and none of those are classified further.
 fn claude_picker_catalog_id(id: &str, anthropic_gateway: bool) -> bool {
-    if id.starts_with("claude-") || id.contains(".anthropic.claude-") {
-        return true;
-    }
-    anthropic_gateway && is_gpt_chat_model_id(id)
+    is_claude_catalog_id(id) || anthropic_gateway
 }
 
-/// A GPT chat model id, including a `provider/model` or `provider:model`
-/// spelling. Media models (`gpt-image-*`, `gpt-audio-*`, `gpt-realtime-*`)
-/// are not selectable from Claude's picker.
-pub(crate) fn is_gpt_chat_model_id(id: &str) -> bool {
-    let leaf = id.rsplit(['/', ':']).next().unwrap_or(id);
-    leaf.starts_with("gpt-")
-        && !leaf.starts_with("gpt-image")
-        && !leaf.starts_with("gpt-audio")
-        && !leaf.starts_with("gpt-realtime")
+/// A Claude model id, including a Bedrock-style `….anthropic.claude-…` spelling.
+/// These stay out of the launch `modelPicker`: the composer already merges them,
+/// and a concrete id there would be preferred over the family alias.
+pub(crate) fn is_claude_catalog_id(id: &str) -> bool {
+    id.starts_with("claude-") || id.contains(".anthropic.claude-")
 }
 
 fn normalize_catalog_url(value: &str) -> String {
@@ -24619,7 +24612,7 @@ model = "gpt"
     }
 
     #[test]
-    fn cc_switch_claude_model_catalog_matches_key_keeps_gpt_chat_and_dedups() {
+    fn cc_switch_claude_model_catalog_matches_key_keeps_gateway_models_and_dedups() {
         let dir = tempfile::tempdir().expect("tempdir");
         let models = dir.path().join("models.json");
         std::fs::write(
@@ -24636,6 +24629,10 @@ model = "gpt"
                             {"id": "openai/gpt-5.6", "name": "GPT 5.6"},
                             {"id": "gpt-image-2", "name": "GPT Image"},
                             {"id": "deepseek-v4-pro", "name": "DeepSeek"},
+                            {"id": "gemini-3-flash", "name": "Gemini"},
+                            {"id": "glm-5.2", "name": "GLM"},
+                            {"id": "kimi-k2.6", "name": "Kimi"},
+                            {"id": "qwen-plus", "name": "Qwen"},
                             {"id": "us.anthropic.claude-sonnet-5", "name": "Sonnet"},
                             {"id": "claude-opus-5-5", "name": "Opus dup"},
                         ]
@@ -24670,11 +24667,17 @@ model = "gpt"
             ids,
             vec![
                 "claude-opus-5-5",
+                "deepseek-v4-pro",
+                "gemini-3-flash",
+                "glm-5.2",
                 "gpt-4o",
+                "gpt-image-2",
+                "kimi-k2.6",
                 "openai/gpt-5.6",
+                "qwen-plus",
                 "us.anthropic.claude-sonnet-5",
             ],
-            "exact key match must drop the other-key provider, media models, and non-GPT vendors: {rows:?}"
+            "exact key match keeps every id from that provider and drops the other key: {rows:?}"
         );
         assert_eq!(
             rows.iter().find(|(id, _, _)| id == "gpt-4o").unwrap().1,
@@ -24683,7 +24686,7 @@ model = "gpt"
     }
 
     #[test]
-    fn cc_switch_claude_model_catalog_skips_gpt_on_an_openai_protocol_provider() {
+    fn cc_switch_claude_model_catalog_skips_foreign_ids_on_an_openai_protocol_provider() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("models.json"),
@@ -24695,7 +24698,8 @@ model = "gpt"
                         "apiKey": "sk-exact",
                         "models": [
                             {"id": "claude-opus-5-5", "name": "Opus"},
-                            {"id": "gpt-5.6", "name": "GPT"}
+                            {"id": "gpt-5.6", "name": "GPT"},
+                            {"id": "qwen-plus", "name": "Qwen"}
                         ]
                     }
                 }
@@ -24772,7 +24776,8 @@ model = "gpt"
                         "apiKey": "sk-a",
                         "models": [
                             {"id": "claude-opus-5-5", "name": "Opus"},
-                            {"id": "gpt-5.6", "name": "GPT"}
+                            {"id": "gpt-5.6", "name": "GPT"},
+                            {"id": "kimi-k2.6", "name": "Kimi"}
                         ]
                     }
                 }
@@ -24799,7 +24804,7 @@ model = "gpt"
         let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["claude-opus-5-5", "gpt-5.6"],
+            vec!["claude-opus-5-5", "gpt-5.6", "kimi-k2.6"],
             "a provider with no api still speaks the Anthropic endpoint it matched"
         );
     }

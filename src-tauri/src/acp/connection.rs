@@ -2775,7 +2775,7 @@ pub async fn spawn_agent_connection(
     initial_state.trae_pat_sign_in =
         agent_type == AgentType::Trae && crate::acp::trae::pat_sign_in_requested(&runtime_env);
     // The `/model` picker rows codeg adds for this Claude, named by every
-    // session request of the connection. GPT chat ids from the cc-switch
+    // session request of the connection. Non-Claude ids from the cc-switch
     // catalog ride along: the adapter rejects a model it does not list, so a
     // row that exists only in the composer's merged list cannot be selected.
     if agent_type == AgentType::ClaudeCode {
@@ -4098,20 +4098,20 @@ fn map_session_config_options(
         .collect()
 }
 
-/// Launch settings for a Claude session: the stored picker rows, then the GPT
-/// chat ids from `catalog`. Claude ids stay out of this object. The composer
-/// merges those itself, and pinning a concrete id here would make the adapter
-/// prefer it over the family alias.
+/// Launch settings for a Claude session: the stored picker rows, then every
+/// non-Claude id from `catalog`. Claude ids stay out of this object. The
+/// composer merges those itself, and pinning a concrete id here would make the
+/// adapter prefer it over the family alias.
 fn claude_launch_settings(
     runtime_env: &BTreeMap<String, String>,
     catalog: &[(String, String, Option<String>)],
 ) -> Option<serde_json::Value> {
-    let gpt_ids: Vec<String> = catalog
+    let extra_ids: Vec<String> = catalog
         .iter()
-        .filter(|(id, _, _)| crate::commands::acp::is_gpt_chat_model_id(id))
+        .filter(|(id, _, _)| !crate::commands::acp::is_claude_catalog_id(id))
         .map(|(id, _, _)| id.clone())
         .collect();
-    crate::acp::claude_model_picker::launch_settings_with(runtime_env, &gpt_ids)
+    crate::acp::claude_model_picker::launch_settings_with(runtime_env, &extra_ids)
 }
 
 /// Add models from the cc-switch provider catalog to Claude's model selector.
@@ -26524,7 +26524,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_launch_settings_sends_gpt_catalog_ids_and_not_claude_ids() {
+    fn claude_launch_settings_sends_non_claude_catalog_ids() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("settings.json"),
@@ -26540,12 +26540,20 @@ mod tests {
             ("claude-opus-5-5".to_string(), "Opus".to_string(), None),
             ("gpt-5.6".to_string(), "gpt-5.6".to_string(), None),
             ("gpt-image-2".to_string(), "GPT Image".to_string(), None),
+            (
+                "us.anthropic.claude-sonnet-5".to_string(),
+                "Sonnet".to_string(),
+                None,
+            ),
+            ("qwen-plus".to_string(), "Qwen".to_string(), None),
         ];
         assert_eq!(
             claude_launch_settings(&env, &catalog),
             Some(serde_json::json!({"modelPicker": {"options": [
                 {"model": "mine"},
                 {"model": "gpt-5.6"},
+                {"model": "gpt-image-2"},
+                {"model": "qwen-plus"},
             ]}}))
         );
         assert!(claude_launch_settings(&BTreeMap::new(), &[]).is_none());
