@@ -69,14 +69,14 @@ Agent 自己处理能处理的事，只在需要人拍板时找人；人在飞�
   2. 带 `risk:low` 标签，且没有 `risk:normal` / `risk:high`；
   3. 未改动合并后会自动发布或天然高风险的路径（工作流、部署、迁移、schema、计费与定价、密钥、`ops/gemini-web/**` 等），文件分页取全，改名的新旧路径都检查；
   4. CI 全部完成且全绿。
-- 默认分支有必需检查的仓库走 `gh pr merge --auto`，由 GitHub 再核 CI；没有的仓库（私有仓库、dev-rules）只靠脚本把关，确认后直接合并。合并锁定检查过的 head commit，脚本不打 tag、不发 release、不部署。
+- 默认分支有必需检查的仓库走 `gh pr merge --auto`，由 GitHub 再核 CI；没有必需检查但 PR 上跑 CI 的仓库（zhifu、science-core、agent-skills、infra-skills）只靠脚本把关，确认后直接合并。PR 上没有任何 CI 的仓库（dev-rules、fde、agent-hub-config）永远不满足条件 4，低风险 PR 也由人合并。合并锁定检查过的 head commit，脚本不打 tag、不发 release、不部署。
 - 直接执行 `gh pr merge` 仍被 `gh-pr-guard` 拦截，除非用户本次会话亲口授权（dev-rules PR #115）。xj-review 已同步（agent-skills PR #89）。
 - `gh-pr-guard` 对 codeg 经 ACP 启动的 Claude 会话生效：本方案的实施会话本身就是这类会话，hook 多次实际拦截与提示。
 - 尚未在真实低风险 PR 上执行过。
 
 ### 合并后自动发布的仓库
 
-合并到 main 即对外生效的 workflow 只在 sub2api：`pricing-registry-publish`（改价格表后经 AWS 生产角色同步到 prod）、`gemini-web-worker`（推镜像到 ghcr.io）。其余发布都要打 tag 或发 release。上述路径都在 `auto-merge-low-risk` 的保护路径内。
+合并到 main 即对外生效的 workflow 只在 sub2api：`pricing-registry-publish`（改价格表后经 AWS 生产角色同步到 prod）、`gemini-web-worker`（推镜像到 ghcr.io）。其余发布都要打 tag 或发 release。上述路径都在 `auto-merge-low-risk` 的保护路径内（`ops/stage0/*probe_account_model*` 由 dev-rules PR #118 补入）。
 
 ## 风险与回滚
 
@@ -92,6 +92,7 @@ Agent 自己处理能处理的事，只在需要人拍板时找人；人在飞�
 - 低风险 PR 自动合并：待首个真实 PR。
 - 版本漂移自动处理：待首次触发。
 - 私有仓库是否升级 GitHub Pro 以获得分支保护：未定。
+- dev-rules、fde、agent-hub-config 的 PR 上没有 CI，自动合并对它们不起作用：是给它们加 CI，还是维持人工合并，未定。
 
 ---
 
