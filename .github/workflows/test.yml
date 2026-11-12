@@ -13,12 +13,8 @@ env:
   INSTA_UPDATE: "no"
   # Debuginfo as line tables only (`test` inherits `dev`): backtraces keep
   # their file:line, and the type and variable records no CI step reads are
-  # not built (on macOS they are most of codeg_lib's ~1 GB debug rlib). With
-  # them the desktop cell ran the 16 GB Windows runner out of commit ("The
-  # paging file is too small for this operation to complete. (os error
-  # 1455)"): rustc maps every upstream rlib copy-on-write, Windows charges
-  # such a view in full against RAM + pagefile, and the tests and bins that
-  # link codeg_lib each map their own view, in parallel.
+  # not built, which shrinks codeg_lib's debug rlib and every test binary
+  # that links it.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 concurrency:
@@ -72,12 +68,17 @@ jobs:
         run: pnpm build
 
   rust:
+    # Linux only. macOS and Windows runners took 15 to 85 minutes per cell,
+    # almost all of it linking `codeg_lib` into test binaries (the macOS
+    # desktop cell: 44 minutes linking, under 2 minutes of tests), against
+    # 5 to 12 minutes on Linux. Release builds (`release.yml`) still cover
+    # all three platforms, so a platform-only break surfaces there.
     name: Rust ${{ matrix.mode }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
+        os: [ubuntu-22.04]
         mode: [desktop, server, cli]
         include:
           - mode: desktop
@@ -105,10 +106,8 @@ jobs:
             clippy_args: "--no-default-features --features server-bin --bin codeg-server --lib"
           - mode: cli
             # The `codeg-cli` client (`src/cli/`), which only `cli-bin`
-            # compiles: the server cells leave it out, and the Windows
-            # desktop cell only builds its tests (`--no-run`), so without
-            # this cell they would never run on Windows. The runtime side
-            # (`cli_run`) is in the lib, which the server cells test already.
+            # compiles: the server cell leaves it out. The runtime side
+            # (`cli_run`) is in the lib, which the server cell tests already.
             cargo_args: "--no-default-features --features cli-bin --lib cli::"
             clippy_args: "--no-default-features --features cli-bin --bin codeg-cli --lib"
     steps:
@@ -126,9 +125,8 @@ jobs:
           shared-key: test-${{ matrix.os }}-${{ matrix.mode }}
 
       - name: Install Linux desktop dependencies
-        # Only the Linux desktop build needs webkit/appindicator. Windows
-        # ships WebView2 with the OS; macOS uses WKWebView from the SDK.
-        if: matrix.os == 'ubuntu-22.04' && matrix.mode == 'desktop'
+        # Only the desktop build needs webkit/appindicator.
+        if: matrix.mode == 'desktop'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -147,12 +145,8 @@ jobs:
           printf '<!doctype html><html><body></body></html>\n' > out/index.html
 
       - name: cargo test
-        # Windows desktop test binaries link the Tauri runtime and can fail at
-        # process load on GitHub-hosted runners before Rust tests start. Keep
-        # compile coverage here; Linux/macOS desktop and Windows server cells
-        # run the executable test suites.
         working-directory: src-tauri
-        run: cargo test ${{ matrix.cargo_args }} ${{ (matrix.os == 'windows-latest' && matrix.mode == 'desktop') && '--no-run' || '' }}
+        run: cargo test ${{ matrix.cargo_args }}
 
       - name: cargo clippy
         # Clippy on each (os, mode) cell — desktop covers tauri-only code
@@ -166,9 +160,9 @@ jobs:
         # Lock in the dedup from Phase 8: web/handlers/{folders,conversations}.rs
         # must not call DB services directly. They have to delegate to a
         # `_core` function in `commands/*.rs` so the Tauri command and HTTP
-        # entrypoints share one implementation. Run on Linux only — pure
-        # text check, no per-OS variance.
-        if: matrix.os == 'ubuntu-22.04' && matrix.mode == 'desktop'
+        # entrypoints share one implementation. A pure text check, so one
+        # cell is enough.
+        if: matrix.mode == 'desktop'
         working-directory: src-tauri
         run: |
           if grep -nE 'folder_service::|conversation_service::|tab_service::|import_service::' \
@@ -181,7 +175,7 @@ jobs:
       - name: Superpowers standalone skill helper layouts
         # executing-plans ships local copies of its sibling helpers so the
         # skill works when Codeg has to copy only one skill on Windows.
-        if: matrix.os == 'ubuntu-22.04' && matrix.mode == 'desktop'
+        if: matrix.mode == 'desktop'
         run: bash scripts/test-superpowers-skill-layouts.sh
 
   local-deploy:
