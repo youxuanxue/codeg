@@ -6287,7 +6287,7 @@
     "promptPlaceholder": "Describe the task for the agent — @ to reference files, / for commands",
     "folderPlaceholder": "Select a folder",
     "baseBranch": "Base branch",
-    "baseBranchDefault": "Current branch when the task starts",
+    "baseBranchDefault": "Default branch of origin (or the current branch if there is no origin)",
     "baseBranchHint": "The task branches from here, and merging lands it back on this branch.",
     "agentInheritedHint": "Inherited from task settings — change it to override for this task",
     "agentNoDefaultHint": "No default agent in task settings — the selected agent will be saved with the task",

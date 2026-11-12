@@ -419,6 +419,80 @@ pub async fn fetch_into_ref(
     rev_parse(path, local_ref).await
 }
 
+/// Where a fresh task starts when the project folder has `remote`: that
+/// remote's default branch, fetched into `local_ref`. Returns the branch name
+/// and the fetched tip, or `None` when the folder has no such remote (a
+/// local-only project, which keeps branching from its checkout).
+///
+/// The default branch is asked of the remote itself (`ls-remote --symref`),
+/// not read from `refs/remotes/<remote>/HEAD`: that local pointer is only
+/// set by `clone` and goes stale when the default is renamed.
+///
+/// Runs through the folder's own remote with the user's own git credentials,
+/// like [`fetch_into_ref`]. No prompt is possible: these run on the engine's
+/// task with no terminal, so a credential prompt would be a hang, and a
+/// failure is reported instead.
+pub async fn fetch_remote_default(
+    path: &str,
+    remote: &str,
+    local_ref: &str,
+) -> Result<Option<(String, String)>, AppCommandError> {
+    let url = run_git(path, &["remote", "get-url", remote]).await?;
+    if !url.status.success() {
+        return Ok(None);
+    }
+    let head = run_git_unattended(path, &["ls-remote", "--symref", remote, "HEAD"]).await?;
+    if !head.status.success() {
+        return Err(git_command_error("ls-remote", &head.stderr));
+    }
+    let branch = String::from_utf8_lossy(&head.stdout)
+        .lines()
+        .find_map(|line| {
+            let (target, name) = line.strip_prefix("ref: ")?.split_once('\t')?;
+            (name.trim() == "HEAD").then(|| target.strip_prefix("refs/heads/"))?
+        })
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AppCommandError::new(
+                AppErrorCode::ExternalCommandFailed,
+                format!("'{remote}' does not say which branch is its default"),
+            )
+        })?;
+    let refspec = format!("+refs/heads/{branch}:{local_ref}");
+    let fetched = run_git_unattended(path, &["fetch", "--quiet", remote, &refspec]).await?;
+    if !fetched.status.success() {
+        return Err(git_command_error("fetch", &fetched.stderr));
+    }
+    let tip = rev_parse(path, local_ref).await?;
+    Ok(Some((branch, tip)))
+}
+
+/// [`run_git`] for a command that may reach the network: nothing in it can
+/// wait on a person, so missing credentials or an unknown host fail instead
+/// of holding the task forever. `GIT_TERMINAL_PROMPT=0` covers HTTPS; for
+/// SSH, `BatchMode` refuses passphrase and host-key prompts and
+/// `ConnectTimeout` bounds an unreachable host. A user's own
+/// `GIT_SSH_COMMAND` / `core.sshCommand` is left alone.
+async fn run_git_unattended(
+    path: &str,
+    args: &[&str],
+) -> Result<std::process::Output, AppCommandError> {
+    let mut cmd = crate::process::tokio_command("git");
+    cmd.args(args)
+        .current_dir(path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null());
+    let own_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some()
+        || std::env::var_os("GIT_SSH").is_some()
+        || run_git(path, &["config", "--get", "core.sshCommand"])
+            .await
+            .is_ok_and(|out| out.status.success());
+    if !own_ssh {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=20");
+    }
+    cmd.output().await.map_err(AppCommandError::io)
+}
+
 /// Drop a ref this module created. Best-effort by design: the commits that
 /// matter are held by the task's own branch, so a leftover here is untidy
 /// rather than dangerous.

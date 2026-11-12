@@ -6287,7 +6287,7 @@
     "promptPlaceholder": "Descreva a tarefa para o agente — @ para referenciar arquivos, / para comandos",
     "folderPlaceholder": "Selecione uma pasta",
     "baseBranch": "Branch base",
-    "baseBranchDefault": "Branch atual quando a tarefa iniciar",
+    "baseBranchDefault": "Branch padrão do origin (ou o branch atual se não houver origin)",
     "baseBranchHint": "A tarefa parte deste branch e o merge a devolve para ele.",
     "agentInheritedHint": "Herdado das configurações de tarefas; altere para personalizar esta tarefa",
     "agentNoDefaultHint": "Não há agente padrão nas configurações de tarefas; o agente selecionado será salvo com a tarefa",

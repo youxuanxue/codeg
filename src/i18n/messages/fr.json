@@ -6287,7 +6287,7 @@
     "promptPlaceholder": "Décrivez la tâche pour l’agent — @ pour référencer des fichiers, / pour les commandes",
     "folderPlaceholder": "Choisir un dossier",
     "baseBranch": "Branche de base",
-    "baseBranchDefault": "Branche actuelle au démarrage de la tâche",
+    "baseBranchDefault": "Branche par défaut d’origin (ou la branche actuelle sans origin)",
     "baseBranchHint": "La tâche part de cette branche, et la fusion l’y ramène.",
     "agentInheritedHint": "Hérité des réglages des tâches — modifiez-le pour personnaliser cette tâche",
     "agentNoDefaultHint": "Aucun agent par défaut dans les réglages des tâches — l'agent sélectionné sera enregistré avec la tâche",

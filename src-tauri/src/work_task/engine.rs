@@ -1719,10 +1719,13 @@ impl TaskEngine {
         }
 
         // Where the task's branch starts, and what its diff is measured
-        // against. Normally both are the project folder's current HEAD; a task
-        // created FOR a particular branch starts at that branch's tip instead,
-        // and a task that IS a pull request starts at that pull request's head
-        // and measures against the merge base (see `pr_checkout_point`).
+        // against. Normally both are the tip of `origin`'s default branch, so
+        // a task starts from what is published whatever branch the project
+        // folder happens to be on; a folder with no `origin` uses its current
+        // HEAD. A task created FOR a particular branch starts at that branch's
+        // tip instead, and a task that IS a pull request starts at that pull
+        // request's head and measures against the merge base (see
+        // `pr_checkout_point`).
         let (base_branch, base_sha, start_at) = match self.pr_checkout_point(task, root).await? {
             Some(point) => point,
             None => match chosen_base_branch(task) {
@@ -1748,15 +1751,18 @@ impl TaskEngine {
                         })?;
                     (branch, tip.clone(), tip)
                 }
-                None => {
-                    let base_branch = project_head.branch.ok_or_else(|| {
-                        "project folder is not on a branch (detached HEAD?)".to_string()
-                    })?;
-                    let base_sha = task_git::rev_parse(&root.path, "HEAD")
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    (base_branch, base_sha.clone(), base_sha)
-                }
+                None => match self.remote_default_point(task, root).await? {
+                    Some(point) => point,
+                    None => {
+                        let base_branch = project_head.branch.ok_or_else(|| {
+                            "project folder is not on a branch (detached HEAD?)".to_string()
+                        })?;
+                        let base_sha = task_git::rev_parse(&root.path, "HEAD")
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        (base_branch, base_sha.clone(), base_sha)
+                    }
+                },
             },
         };
 
@@ -1795,9 +1801,10 @@ impl TaskEngine {
             .map_err(|_| format!("worktree add failed: {e}"))?;
         }
 
-        // Whatever a pull-request checkout fetched is now held by the task's
-        // own branch, so the names it was fetched under can go.
-        self.drop_pr_fetch_refs(task, root).await;
+        // Whatever a pull-request or default-branch checkout fetched is now
+        // held by the task's own branch, so the names it was fetched under can
+        // go.
+        self.drop_setup_fetch_refs(task, root).await;
 
         let wt = open_worktree_folder_core(&self.db, wt_path, task.folder_id)
             .await
@@ -1928,27 +1935,58 @@ impl TaskEngine {
             .map_err(|e| {
                 format!("could not find where pull request #{} branched off: {e}", meta.number)
             })?;
-        // The refs stay for now — see `drop_pr_fetch_refs`: until the task's
+        // The refs stay for now — see `drop_setup_fetch_refs`: until the task's
         // branch exists, they are the only thing keeping what we just fetched
         // reachable. A failed setup leaves them behind, which costs nothing:
         // the next attempt force-updates the same two names.
         Ok(Some((base_ref.to_string(), base_sha, head_sha.to_string())))
     }
 
-    /// Drop the refs `pr_checkout_point` fetched under. Called only once the
-    /// task's branch exists: those refs are what keeps the fetched commits
-    /// reachable until then, and deleting them earlier would leave a window in
-    /// which a concurrent `git gc` could prune what we are about to check out.
-    async fn drop_pr_fetch_refs(
+    /// Drop the refs `pr_checkout_point` and `remote_default_point` fetched
+    /// under. Called only once the task's branch exists: those refs are what
+    /// keeps the fetched commits reachable until then, and deleting them
+    /// earlier would leave a window in which a concurrent `git gc` could prune
+    /// what we are about to check out.
+    async fn drop_setup_fetch_refs(
         &self,
         task: &crate::db::entities::work_task::Model,
         root: &crate::models::FolderDetail,
     ) {
+        task_git::delete_ref(&root.path, &default_base_ref(task.id)).await;
         if task.source_kind.as_deref() != Some(SOURCE_KIND_PR) {
             return;
         }
         for suffix in ["pr-base", "pr-head"] {
             task_git::delete_ref(&root.path, &format!("refs/codeg/task-{}/{suffix}", task.id)).await;
+        }
+    }
+
+    /// The tip of `origin`'s default branch, for a task with no branch of its
+    /// own to start from: `(branch, base sha, start)`. `None` when the
+    /// project folder has no `origin`, so a local-only project keeps
+    /// branching from its checkout.
+    ///
+    /// Starting here rather than at the folder's HEAD is what keeps a task
+    /// independent of where the user left the checkout. On a feature branch,
+    /// the HEAD would carry that branch's unmerged commits into the task, and
+    /// its pull request would target the feature branch instead of the
+    /// default one.
+    ///
+    /// A folder WITH `origin` whose default branch cannot be read fails the
+    /// setup instead of falling back: the fallback is exactly the wrong
+    /// starting point this exists to avoid, delivered without a word.
+    async fn remote_default_point(
+        &self,
+        task: &crate::db::entities::work_task::Model,
+        root: &crate::models::FolderDetail,
+    ) -> Result<Option<(String, String, String)>, String> {
+        match task_git::fetch_remote_default(&root.path, "origin", &default_base_ref(task.id)).await
+        {
+            Ok(Some((branch, tip))) => Ok(Some((branch, tip.clone(), tip))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!(
+                "could not read the default branch from `origin`, where the task starts: {e}"
+            )),
         }
     }
 
@@ -7240,6 +7278,12 @@ fn launch_mode_for(task: &crate::db::entities::work_task::Model) -> LaunchMode {
 /// choice is no choice: the editor writes the empty string for "the project
 /// folder's current branch", which is also what every task predating the
 /// field carries.
+/// Where [`TaskEngine::remote_default_point`] fetches `origin`'s default
+/// branch: per task, because these fetches run in the shared project folder.
+fn default_base_ref(task_id: i32) -> String {
+    format!("refs/codeg/task-{task_id}/default-base")
+}
+
 fn chosen_base_branch(task: &crate::db::entities::work_task::Model) -> Option<String> {
     serde_json::from_str::<WorkTaskConfig>(&task.config)
         .ok()?
@@ -14711,11 +14755,10 @@ mod tests {
         drop(home);
     }
 
-    /// No choice recorded — every task created before this existed, and every
-    /// task of a user who does not care — keeps branching from the project
-    /// folder's current checkout.
+    /// No choice recorded and no `origin` — a local-only project — keeps
+    /// branching from the project folder's current checkout.
     #[tokio::test]
-    async fn a_task_without_a_chosen_branch_still_follows_the_checkout() {
+    async fn a_task_without_a_chosen_branch_or_origin_follows_the_checkout() {
         let (engine, task_id, home, _feature_tip, main_tip) =
             branch_choice_fixture(serde_json::json!({})).await;
         let task = row(&engine, task_id).await;
@@ -14729,6 +14772,161 @@ mod tests {
         let after = row(&engine, task_id).await;
         assert_eq!(after.base_branch.as_deref(), Some("main"));
         assert_eq!(after.base_sha.as_deref(), Some(main_tip.as_str()));
+        drop(home);
+    }
+
+    /// A project folder cloned from `origin`, which has moved on since: the
+    /// folder sits on a `feature` branch with a commit of its own, and
+    /// `origin/main` has a commit the folder never fetched. Returns
+    /// `(engine, task id, home, origin's main tip, the folder's HEAD)`.
+    async fn remote_default_fixture() -> (Arc<TaskEngine>, i32, tempfile::TempDir, String, String) {
+        use sea_orm::{ActiveModelTrait, Set};
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let origin = home.path().join("origin");
+        std::fs::create_dir_all(&origin).expect("mkdir");
+        git_run(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("a.txt"), "one\n").expect("write");
+        git_run(&origin, &["add", "-A"]);
+        git_run(&origin, &["commit", "-q", "-m", "base"]);
+        let root = home.path().join("repo");
+        git_run(
+            home.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                root.to_str().unwrap(),
+            ],
+        );
+        // The user's own unmerged work, where they left the checkout…
+        git_run(&root, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("wip.txt"), "unmerged\n").expect("write");
+        git_run(&root, &["add", "-A"]);
+        git_run(&root, &["commit", "-q", "-m", "work in progress"]);
+        let checkout_head = task_git::rev_parse(root.to_str().unwrap(), "HEAD")
+            .await
+            .expect("checkout head");
+        // …and what was published since the clone.
+        std::fs::write(origin.join("b.txt"), "published\n").expect("write");
+        git_run(&origin, &["add", "-A"]);
+        git_run(&origin, &["commit", "-q", "-m", "main moves on"]);
+        let origin_main = task_git::rev_parse(origin.to_str().unwrap(), "HEAD")
+            .await
+            .expect("origin main");
+
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let folder_id = crate::db::test_helpers::seed_folder(&db, root.to_str().unwrap()).await;
+        let now = chrono::Utc::now();
+        let task = crate::db::entities::work_task::ActiveModel {
+            folder_id: Set(folder_id),
+            title: Set("Bump the version".to_string()),
+            config: Set("{}".to_string()),
+            status: Set(WorkTaskStatus::Todo),
+            run_seq: Set(1),
+            sort_order: Set(0),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db.conn)
+        .await
+        .expect("insert task");
+        (test_engine(db), task.id, home, origin_main, checkout_head)
+    }
+
+    /// With an `origin`, a task with no branch of its own starts from what
+    /// `origin`'s default branch has now — not from wherever the project
+    /// folder was left, and not from the folder's stale copy of `main`.
+    #[tokio::test]
+    async fn a_task_starts_from_origins_default_branch_not_the_checkout() {
+        let (engine, task_id, home, origin_main, checkout_head) = remote_default_fixture().await;
+        let task = row(&engine, task_id).await;
+        let root = get_folder_core(&engine.db, task.folder_id)
+            .await
+            .expect("root");
+
+        let wt = engine
+            .ensure_worktree(&task, &root, &WorkTaskFolderSettings::default())
+            .await
+            .expect("worktree");
+
+        let head = task_git::rev_parse(&wt.path, "HEAD").await.expect("head");
+        assert_eq!(head, origin_main, "the worktree starts at origin's main");
+        assert_ne!(
+            head, checkout_head,
+            "the checkout's feature branch is not the start"
+        );
+        assert!(
+            !Path::new(&wt.path).join("wip.txt").exists(),
+            "the checkout's unmerged work does not come along"
+        );
+        let after = row(&engine, task_id).await;
+        assert_eq!(after.base_branch.as_deref(), Some("main"));
+        assert_eq!(after.base_sha.as_deref(), Some(origin_main.as_str()));
+        assert_eq!(
+            task_git::rev_parse(&root.path, "HEAD")
+                .await
+                .expect("checkout"),
+            checkout_head,
+            "the user's checkout is left exactly where it was"
+        );
+        assert!(
+            task_git::rev_parse(&root.path, &default_base_ref(task_id))
+                .await
+                .is_err(),
+            "the fetched ref is dropped once the task branch holds the commit"
+        );
+        drop(home);
+    }
+
+    /// A default branch that is not called `main` is asked of the remote, not
+    /// guessed.
+    #[tokio::test]
+    async fn the_remote_names_its_own_default_branch() {
+        let (engine, task_id, home, origin_main, _checkout_head) = remote_default_fixture().await;
+        let origin = home.path().join("origin");
+        git_run(&origin, &["branch", "-m", "main", "trunk"]);
+        let task = row(&engine, task_id).await;
+        let root = get_folder_core(&engine.db, task.folder_id)
+            .await
+            .expect("root");
+
+        let wt = engine
+            .ensure_worktree(&task, &root, &WorkTaskFolderSettings::default())
+            .await
+            .expect("worktree");
+
+        assert_eq!(
+            task_git::rev_parse(&wt.path, "HEAD").await.expect("head"),
+            origin_main
+        );
+        assert_eq!(
+            row(&engine, task_id).await.base_branch.as_deref(),
+            Some("trunk")
+        );
+        drop(home);
+    }
+
+    /// An `origin` that cannot be read fails the setup. Falling back to the
+    /// checkout would hand the task the very starting point it must not
+    /// have, without a word.
+    #[tokio::test]
+    async fn an_unreadable_origin_refuses_instead_of_falling_back() {
+        let (engine, task_id, home, _origin_main, _checkout_head) = remote_default_fixture().await;
+        std::fs::remove_dir_all(home.path().join("origin")).expect("drop origin");
+        let task = row(&engine, task_id).await;
+        let root = get_folder_core(&engine.db, task.folder_id)
+            .await
+            .expect("root");
+
+        let err = engine
+            .ensure_worktree(&task, &root, &WorkTaskFolderSettings::default())
+            .await
+            .err()
+            .expect("must refuse");
+        assert!(err.contains("origin"), "{err}");
+        assert!(row(&engine, task_id).await.worktree_folder_id.is_none());
         drop(home);
     }
 
