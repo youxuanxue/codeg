@@ -4519,8 +4519,7 @@
     "none": "无分支",
     "local": "本地",
     "remote": "远程",
-    "useCustom": "使用 “{query}”",
-    "head": "HEAD"
+    "useCustom": "使用 “{query}”"
   },
   "ChatChannelSettings": {
     "loading": "加载中...",
@@ -6287,7 +6286,8 @@
     "promptPlaceholder": "向 agent 描述任务——输入 @ 可引用文件，/ 可唤起命令",
     "folderPlaceholder": "选择文件夹",
     "baseBranch": "基准分支",
-    "baseBranchDefault": "任务开始时的当前分支",
+    "baseBranchDefault": "origin 的默认分支（没有 origin 时用当前分支）",
+    "baseBranchPlaceholder": "（默认分支）",
     "baseBranchHint": "任务从该分支拉出工作树，合并时也落回该分支。",
     "agentInheritedHint": "继承自任务设置，修改后仅对本任务生效",
     "agentNoDefaultHint": "任务设置中没有默认 agent，当前选中的 agent 将随任务保存",

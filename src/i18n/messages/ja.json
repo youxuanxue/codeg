@@ -5226,8 +5226,7 @@
     "none": "ブランチがありません",
     "local": "ローカル",
     "remote": "リモート",
-    "useCustom": "「{query}」を使用",
-    "head": "HEAD"
+    "useCustom": "「{query}」を使用"
   },
   "BackupSettings": {
     "tabs": {
@@ -6287,7 +6286,8 @@
     "promptPlaceholder": "エージェントへの指示を記述 — @ でファイル参照、/ でコマンド",
     "folderPlaceholder": "フォルダを選択",
     "baseBranch": "ベースブランチ",
-    "baseBranchDefault": "タスク開始時の現在のブランチ",
+    "baseBranchDefault": "origin のデフォルトブランチ（origin がない場合は現在のブランチ）",
+    "baseBranchPlaceholder": "（デフォルトブランチ）",
     "baseBranchHint": "タスクはこのブランチから分岐し、マージもこのブランチに戻ります。",
     "agentInheritedHint": "タスク設定から継承 — 変更するとこのタスク専用になります",
     "agentNoDefaultHint": "タスク設定に既定のエージェントがありません — 選択中のエージェントをこのタスクに保存します",

@@ -6,11 +6,9 @@ import enMessages from "@/i18n/messages/en.json"
 import type { WorkTask, WorkTaskDraft } from "@/lib/types"
 
 const branchesMock = vi.fn()
-const headMock = vi.fn()
 
 vi.mock("@/lib/api", () => ({
   gitListAllBranches: (...args: unknown[]) => branchesMock(...args),
-  getGitBranch: (...args: unknown[]) => headMock(...args),
   workTaskSettingsEffective: () =>
     Promise.resolve({
       default_agent_type: null,
@@ -184,7 +182,6 @@ beforeEach(() => {
     worktree_branches: [],
     main_worktree_branch: null,
   })
-  headMock.mockReset().mockResolvedValue("main")
 })
 
 describe("TaskEditorDialog base branch", () => {
@@ -201,23 +198,23 @@ describe("TaskEditorDialog base branch", () => {
     expect(onSubmit.mock.calls[0][0].config.base_branch).toBe("feature")
   })
 
-  it("an unpicked base reads HEAD and the branch the project folder is on", async () => {
+  it("an unpicked base says origin's default branch, not the branch the checkout is on", async () => {
     const user = userEvent.setup()
     renderEditor()
 
-    // Unpicked = the project folder's checkout when the task starts, so the
-    // picker says HEAD and names the branch that checkout is on right now.
+    // Unpicked = `origin`'s default branch when the task starts, whichever
+    // branch the project folder's checkout happens to be on.
     const trigger = screen.getByRole("button", { name: "Base branch" })
-    await waitFor(() => expect(trigger).toHaveTextContent(/^HEAD\s*main$/))
-    expect(headMock).toHaveBeenCalledWith("/tmp/proj")
+    await waitFor(() =>
+      expect(trigger).toHaveTextContent(/^\(default branch\)$/)
+    )
+    expect(trigger).not.toHaveTextContent("HEAD")
 
     await user.click(trigger)
-    const entry = await screen.findByRole("option", { name: /^HEAD/ })
-    expect(entry).toHaveTextContent(/^HEAD\s*main$/)
-    expect(entry).toHaveAttribute(
-      "title",
-      "Current branch when the task starts"
-    )
+    const entry = await screen.findByRole("option", {
+      name: "Default branch of origin (or the current branch if there is no origin)",
+    })
+    expect(entry).not.toHaveTextContent("HEAD")
   })
 
   it("leaves the base unset when nothing is picked", async () => {
@@ -228,8 +225,8 @@ describe("TaskEditorDialog base branch", () => {
     await user.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalled())
-    // Null, not "": the engine reads that as "the project folder's current
-    // branch when the task starts" — what a task did before the choice existed.
+    // Null, not "": the engine reads that as "no choice" and starts the task
+    // from `origin`'s default branch.
     expect(onSubmit.mock.calls[0][0].config.base_branch).toBeNull()
   })
 
@@ -260,7 +257,6 @@ describe("TaskEditorDialog base branch", () => {
     expect(trigger).toBeDisabled()
     // Nor is the checkout's HEAD any of its business.
     expect(trigger).not.toHaveTextContent("HEAD")
-    expect(headMock).not.toHaveBeenCalled()
   })
 
   it("saving a task that already ran keeps the request it was created with", async () => {
@@ -309,7 +305,9 @@ describe("TaskEditorDialog base branch", () => {
 
     const trigger = await screen.findByRole("button", { name: "Base branch" })
     expect(trigger).toBeEnabled()
-    await waitFor(() => expect(trigger).toHaveTextContent(/^HEAD\s*main$/))
+    await waitFor(() =>
+      expect(trigger).toHaveTextContent(/^\(default branch\)$/)
+    )
     await user.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalled())

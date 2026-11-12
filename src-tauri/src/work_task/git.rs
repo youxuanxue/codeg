@@ -419,6 +419,91 @@ pub async fn fetch_into_ref(
     rev_parse(path, local_ref).await
 }
 
+/// Where a fresh task starts when the project folder has `remote`: that
+/// remote's default branch, fetched into `local_ref`. Returns the branch name
+/// and the fetched tip, or `None` when there is nothing published to start
+/// from: the folder has no such remote (a local-only project), or the remote
+/// has no commits yet (created, never pushed). Either way the task keeps
+/// branching from the checkout, the only content there is.
+///
+/// The default branch is asked of the remote itself (`ls-remote --symref`),
+/// not read from `refs/remotes/<remote>/HEAD`: that local pointer is only
+/// set by `clone` and goes stale when the default is renamed.
+///
+/// Runs through the folder's own remote with the user's own git credentials,
+/// like [`fetch_into_ref`]. No prompt is possible: these run on the engine's
+/// task with no terminal, so a credential prompt would be a hang, and a
+/// failure is reported instead.
+pub async fn fetch_remote_default(
+    path: &str,
+    remote: &str,
+    local_ref: &str,
+) -> Result<Option<(String, String)>, AppCommandError> {
+    let url = run_git(path, &["remote", "get-url", remote]).await?;
+    if !url.status.success() {
+        return Ok(None);
+    }
+    let head = run_git_unattended(path, &["ls-remote", "--symref", remote, "HEAD"]).await?;
+    if !head.status.success() {
+        return Err(git_command_error("ls-remote", &head.stderr));
+    }
+    // An empty repository has no HEAD to report: the command succeeds with
+    // no output.
+    if head.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let branch = String::from_utf8_lossy(&head.stdout)
+        .lines()
+        .find_map(|line| {
+            let (target, name) = line.strip_prefix("ref: ")?.split_once('\t')?;
+            (name.trim() == "HEAD").then(|| target.strip_prefix("refs/heads/"))?
+        })
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AppCommandError::new(
+                AppErrorCode::ExternalCommandFailed,
+                format!("'{remote}' does not say which branch is its default"),
+            )
+        })?;
+    // The name comes from the remote, and it goes into a refspec next, then
+    // onto the task row and into the merge prompt: refspec syntax in it is
+    // refused, not passed along.
+    crate::commands::folders::ensure_pushable_branch_name(&branch)?;
+    let refspec = format!("+refs/heads/{branch}:{local_ref}");
+    let fetched = run_git_unattended(path, &["fetch", "--quiet", remote, &refspec]).await?;
+    if !fetched.status.success() {
+        return Err(git_command_error("fetch", &fetched.stderr));
+    }
+    let tip = rev_parse(path, local_ref).await?;
+    Ok(Some((branch, tip)))
+}
+
+/// [`run_git`] for a command that may reach the network: nothing in it can
+/// wait on a person, so missing credentials or an unknown host fail instead
+/// of holding the task forever. `GIT_TERMINAL_PROMPT=0` covers HTTPS; for
+/// SSH, `BatchMode` refuses passphrase and host-key prompts and
+/// `ConnectTimeout` bounds an unreachable host. A user's own
+/// `GIT_SSH_COMMAND` / `core.sshCommand` is left alone.
+async fn run_git_unattended(
+    path: &str,
+    args: &[&str],
+) -> Result<std::process::Output, AppCommandError> {
+    let mut cmd = crate::process::tokio_command("git");
+    cmd.args(args)
+        .current_dir(path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null());
+    let own_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some()
+        || std::env::var_os("GIT_SSH").is_some()
+        || run_git(path, &["config", "--get", "core.sshCommand"])
+            .await
+            .is_ok_and(|out| out.status.success());
+    if !own_ssh {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=20");
+    }
+    cmd.output().await.map_err(AppCommandError::io)
+}
+
 /// Drop a ref this module created. Best-effort by design: the commits that
 /// matter are held by the task's own branch, so a leftover here is untidy
 /// rather than dangerous.
@@ -1078,6 +1163,38 @@ mod tests {
 
     /// Copying an index must keep Git's racy-clean check: a same-size edit
     /// whose stat data still matches the cached entry needs to be rehashed.
+    /// A default branch name taken from the remote goes into a refspec, so
+    /// one shaped like refspec syntax is refused before any fetch runs.
+    #[tokio::test]
+    async fn a_remote_default_with_refspec_syntax_is_refused() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let origin = home.path().join("origin");
+        std::fs::create_dir_all(&origin).expect("mkdir");
+        git_run(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("a.txt"), "one\n").expect("write");
+        git_run(&origin, &["add", "-A"]);
+        git_run(&origin, &["commit", "-q", "-m", "base"]);
+        // A name `git branch` refuses to create, written as a raw ref: the
+        // remote is not ours, so what it reports is not ours to trust.
+        git_run(&origin, &["update-ref", "refs/heads/-x", "HEAD"]);
+        git_run(&origin, &["symbolic-ref", "HEAD", "refs/heads/-x"]);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        git_run(&repo, &["init", "-q", "-b", "main"]);
+        git_run(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+
+        let err = fetch_remote_default(repo.to_str().unwrap(), "origin", "refs/codeg/t/default")
+            .await
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("Invalid branch name"), "{err}");
+        assert!(
+            rev_parse(repo.to_str().unwrap(), "refs/codeg/t/default")
+                .await
+                .is_err(),
+            "nothing was fetched"
+        );
+    }
+
     #[tokio::test]
     async fn a_copied_index_still_stages_a_racily_clean_edit() {
         let dir = tempfile::tempdir().expect("tempdir");

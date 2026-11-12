@@ -536,10 +536,10 @@ function TaskEditorBody({
                 // request, because that is what a save would write back.
                 value={pinned ? (task?.base_branch ?? baseBranch) : baseBranch}
                 onChange={(b) => setBaseBranch(b)}
-                // No pick means the project folder's checkout when the task
-                // starts, i.e. HEAD, so the picker says HEAD and names the
-                // branch it is on right now.
-                defaultFollowsHead
+                // No pick means `origin`'s default branch when the task starts
+                // (the checkout only when there is no `origin`), so the picker
+                // names that rule rather than the branch the checkout is on.
+                placeholder={t("baseBranchPlaceholder")}
                 defaultLabel={t("baseBranchDefault")}
                 title={t("baseBranch")}
                 // The base is recorded when the worktree is minted, and every
