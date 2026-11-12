@@ -14322,8 +14322,19 @@ fn codex_app_server_lost(e: &agent_client_protocol::Error) -> Option<bool> {
 /// [`classify_session_load_failure`] (a `session/load` that can't be retried)
 /// and [`prompt_rejection_is_terminal`] (a `session/prompt` rejection that no
 /// later prompt on this connection could survive either).
-const SESSION_GONE_MARKERS: &[&str] =
-    &["process exited", "session has ended", "Session not found", "failed to resolve rollout"];
+const SESSION_GONE_MARKERS: &[&str] = &[
+    "process exited",
+    "session has ended",
+    "Session not found",
+    "failed to resolve rollout",
+    // Codex's thread index is unreadable (`thread_history_*.sqlite` is not a
+    // database) or names a rollout it cannot open. The rollout file may still
+    // be on disk. `session/new` succeeds anyway and rebinds the row to an
+    // empty session, which is how a follow-up loses the conversation it was
+    // sent into. Keep the banner; Reload retries the same thread.
+    "failed to open thread history",
+    "no rollout found",
+];
 
 /// Whether a `session/prompt` rejection means the CONNECTION is dead, or only
 /// this turn.
@@ -30951,6 +30962,28 @@ mod tests {
             ),
             Some("session_unavailable"),
         );
+        // The thread index itself will not open. Measured: code 26, "file is
+        // not a database", wrapped as a failed thread-history open. The
+        // rollout is often still on disk, so a fresh session must not replace
+        // the row.
+        assert_eq!(
+            classify_session_load_failure(
+                agent_client_protocol::schema::v1::ErrorCode::InternalError,
+                "Internal error: { \"details\": \"failed to list thread history: \
+                 thread-store internal error: failed to open thread history database: \
+                 failed to open thread history DB at /tmp/.codex/thread_history_1.sqlite: \
+                 error returned from database: (code: 26) file is not a database\" }",
+            ),
+            Some("session_unavailable"),
+        );
+        assert_eq!(
+            classify_session_load_failure(
+                agent_client_protocol::schema::v1::ErrorCode::InternalError,
+                "Internal error: { \"details\": \"no rollout found for thread id \
+                 01a1c7b3-ea04-7782-baa2-e5f5fde4d8c6\" }",
+            ),
+            Some("session_unavailable"),
+        );
     }
 
     #[test]
@@ -36902,6 +36935,45 @@ mod tests {
             )),
             "{emitted:#?}"
         );
+    }
+
+    /// Codex could not open the thread it was asked for — a corrupt thread
+    /// index, or a rollout the index cannot find. The history still belongs
+    /// to this conversation, so the reopen stops on the banner instead of
+    /// binding a blank `session/new` over it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_codex_thread_store_failure_keeps_the_conversation() {
+        for details in [
+            "failed to open thread history DB at /tmp/.codex/thread_history_1.sqlite: \
+             error returned from database: (code: 26) file is not a database",
+            "no rollout found for thread id 01a1c7b3-ea04-7782-baa2-e5f5fde4d8c6",
+        ] {
+            let (ended, emitted, requests) =
+                reopen_resume_and_load_failing_with(serde_json::json!({
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": { "details": details }
+                }))
+                .await;
+            assert_eq!(
+                requests,
+                ["initialize", "session/resume", "session/load"],
+                "{details}"
+            );
+            assert!(ended.is_ok(), "{details}: {ended:?}");
+            assert!(
+                emitted.iter().any(|e| matches!(
+                    e,
+                    AcpEvent::SessionLoadFailed { session_id, code, .. }
+                        if session_id == "s-old" && code == "session_unavailable"
+                )),
+                "{details}: {emitted:#?}"
+            );
+            assert!(
+                !emitted.iter().any(|e| matches!(e, AcpEvent::SessionStarted { .. })),
+                "{details}: {emitted:#?}"
+            );
+        }
     }
 
     /// The control: a failure without a reason still falls back to a new
