@@ -1962,9 +1962,9 @@ impl TaskEngine {
     }
 
     /// The tip of `origin`'s default branch, for a task with no branch of its
-    /// own to start from: `(branch, base sha, start)`. `None` when the
-    /// project folder has no `origin`, so a local-only project keeps
-    /// branching from its checkout.
+    /// own to start from: `(branch, base sha, start)`. `None` when there is
+    /// nothing published to start from (no `origin`, or an `origin` with no
+    /// commits yet), so the task keeps branching from the checkout.
     ///
     /// Starting here rather than at the folder's HEAD is what keeps a task
     /// independent of where the user left the checkout. On a feature branch,
@@ -3964,6 +3964,22 @@ impl TaskEngine {
                  '{base_branch}' to merge",
                 head.branch.as_deref().unwrap_or("detached HEAD")
             ));
+        }
+        // The task branched from `origin`'s default branch, which may be ahead
+        // of the checkout's copy of it. Merging then would carry everyone
+        // else's published commits into the checkout as part of this task —
+        // squashed into its one commit — so the checkout must hold the task's
+        // starting point first.
+        if let Some(base_sha) = task.base_sha.as_deref() {
+            if !task_git::is_ancestor(&root.path, base_sha, "HEAD")
+                .await
+                .unwrap_or(false)
+            {
+                return Err(format!(
+                    "the project folder's '{base_branch}' is behind where this task started — \
+                     pull '{base_branch}' first, then merge"
+                ));
+            }
         }
         match task_git::staged_clean(&root.path).await {
             Ok(true) => {}
@@ -12483,6 +12499,41 @@ mod tests {
         assert!(f.forge.pushes.lock().await.is_empty());
     }
 
+    /// A task that started from a commit the checkout does not have — the
+    /// usual case once tasks start from `origin`'s default branch and the
+    /// checkout has not pulled — must not merge: squashing would carry the
+    /// published commits in between into the checkout as this task's change.
+    #[tokio::test]
+    async fn a_merge_refuses_a_checkout_behind_the_tasks_start() {
+        use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+
+        let f = delivery_fixture(FakeForge::default()).await;
+        // Record a start the checkout's `main` does not contain: the task's
+        // own work commit stands in for "origin's main, already moved on".
+        let mut task = row(&f.engine, f.task_id).await.into_active_model();
+        task.base_sha = Set(Some(f.head.clone()));
+        task.update(&f.engine.db.conn).await.expect("update");
+        let before = task_git::rev_parse(f.root.to_str().unwrap(), "HEAD")
+            .await
+            .expect("head");
+
+        let err = f
+            .engine
+            .merge_task(f.task_id, None, false, None, false)
+            .await
+            .expect_err("must refuse");
+        assert!(err.contains("pull 'main' first"), "got {err}");
+        assert!(!is_benign_merge_race(&err), "the card shows why");
+        assert_eq!(row(&f.engine, f.task_id).await.status, WorkTaskStatus::Review);
+        assert_eq!(
+            task_git::rev_parse(f.root.to_str().unwrap(), "HEAD")
+                .await
+                .expect("head"),
+            before,
+            "the checkout is untouched"
+        );
+    }
+
     /// A merge that cannot take in-flight ownership must not dispatch either.
     /// The claim and the review→merging CAS are independent, so a claim-loser
     /// that carried on could win the CAS and then be left unowned when the
@@ -14905,6 +14956,38 @@ mod tests {
             row(&engine, task_id).await.base_branch.as_deref(),
             Some("trunk")
         );
+        drop(home);
+    }
+
+    /// An `origin` that exists but holds no commits yet (created, never
+    /// pushed) has nothing to start from, so the checkout is the start.
+    #[tokio::test]
+    async fn an_empty_origin_falls_back_to_the_checkout() {
+        let (engine, task_id, home, _origin_main, checkout_head) = remote_default_fixture().await;
+        let empty = home.path().join("empty.git");
+        // Not `git_run`: it configures the repository it runs in, and a bare
+        // one has no work tree to configure.
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "--bare", empty.to_str().unwrap()])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("spawn git");
+        assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+        let task = row(&engine, task_id).await;
+        let root = get_folder_core(&engine.db, task.folder_id).await.expect("root");
+        git_run(
+            Path::new(&root.path),
+            &["remote", "set-url", "origin", empty.to_str().unwrap()],
+        );
+
+        let wt = engine
+            .ensure_worktree(&task, &root, &WorkTaskFolderSettings::default())
+            .await
+            .expect("worktree");
+
+        assert_eq!(task_git::rev_parse(&wt.path, "HEAD").await.expect("head"), checkout_head);
+        assert_eq!(row(&engine, task_id).await.base_branch.as_deref(), Some("feature"));
         drop(home);
     }
 

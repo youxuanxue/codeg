@@ -421,8 +421,10 @@ pub async fn fetch_into_ref(
 
 /// Where a fresh task starts when the project folder has `remote`: that
 /// remote's default branch, fetched into `local_ref`. Returns the branch name
-/// and the fetched tip, or `None` when the folder has no such remote (a
-/// local-only project, which keeps branching from its checkout).
+/// and the fetched tip, or `None` when there is nothing published to start
+/// from: the folder has no such remote (a local-only project), or the remote
+/// has no commits yet (created, never pushed). Either way the task keeps
+/// branching from the checkout, the only content there is.
 ///
 /// The default branch is asked of the remote itself (`ls-remote --symref`),
 /// not read from `refs/remotes/<remote>/HEAD`: that local pointer is only
@@ -444,6 +446,11 @@ pub async fn fetch_remote_default(
     let head = run_git_unattended(path, &["ls-remote", "--symref", remote, "HEAD"]).await?;
     if !head.status.success() {
         return Err(git_command_error("ls-remote", &head.stderr));
+    }
+    // An empty repository has no HEAD to report: the command succeeds with
+    // no output.
+    if head.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
     }
     let branch = String::from_utf8_lossy(&head.stdout)
         .lines()
