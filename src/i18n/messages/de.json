@@ -5226,8 +5226,7 @@
     "none": "Keine Branches",
     "local": "Lokal",
     "remote": "Remote",
-    "useCustom": "„{query}“ verwenden",
-    "head": "HEAD"
+    "useCustom": "„{query}“ verwenden"
   },
   "BackupSettings": {
     "tabs": {
@@ -6288,6 +6287,7 @@
     "folderPlaceholder": "Ordner wählen",
     "baseBranch": "Basis-Branch",
     "baseBranchDefault": "Standard-Branch von origin (ohne origin der aktuelle Branch)",
+    "baseBranchPlaceholder": "(Standard-Branch)",
     "baseBranchHint": "Die Aufgabe zweigt von diesem Branch ab und wird beim Mergen wieder dorthin übernommen.",
     "agentInheritedHint": "Aus den Aufgaben-Einstellungen geerbt — Änderungen gelten nur für diese Aufgabe",
     "agentNoDefaultHint": "Kein Standard-Agent in den Aufgaben-Einstellungen — der ausgewählte Agent wird mit der Aufgabe gespeichert",

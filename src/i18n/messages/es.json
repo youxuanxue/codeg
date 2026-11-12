@@ -5226,8 +5226,7 @@
     "none": "Sin ramas",
     "local": "Local",
     "remote": "Remota",
-    "useCustom": "Usar «{query}»",
-    "head": "HEAD"
+    "useCustom": "Usar «{query}»"
   },
   "BackupSettings": {
     "tabs": {
@@ -6288,6 +6287,7 @@
     "folderPlaceholder": "Selecciona una carpeta",
     "baseBranch": "Rama base",
     "baseBranchDefault": "Rama predeterminada de origin (o la rama actual si no hay origin)",
+    "baseBranchPlaceholder": "(rama predeterminada)",
     "baseBranchHint": "La tarea parte de esta rama y la fusión la devuelve a ella.",
     "agentInheritedHint": "Heredado de la configuración de tareas; cámbialo para personalizar esta tarea",
     "agentNoDefaultHint": "No hay agente por defecto en la configuración de tareas; el agente seleccionado se guardará con la tarea",

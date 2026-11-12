@@ -5226,8 +5226,7 @@
     "none": "無分支",
     "local": "本機",
     "remote": "遠端",
-    "useCustom": "使用「{query}」",
-    "head": "HEAD"
+    "useCustom": "使用「{query}」"
   },
   "BackupSettings": {
     "tabs": {
@@ -6288,6 +6287,7 @@
     "folderPlaceholder": "選擇資料夾",
     "baseBranch": "基準分支",
     "baseBranchDefault": "origin 的預設分支（沒有 origin 時用目前分支）",
+    "baseBranchPlaceholder": "（預設分支）",
     "baseBranchHint": "任務從該分支拉出工作樹，合併時也會落回該分支。",
     "agentInheritedHint": "繼承自任務設定，修改後僅對本任務生效",
     "agentNoDefaultHint": "任務設定中沒有預設 agent，目前選取的 agent 將隨任務儲存",

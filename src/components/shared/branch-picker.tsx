@@ -2,13 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
-import {
-  Check,
-  ChevronDown,
-  GitBranch,
-  Loader2,
-  LocateFixed,
-} from "lucide-react"
+import { Check, ChevronDown, GitBranch, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   Command,
@@ -23,11 +17,11 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
-import { getGitBranch, gitListAllBranches } from "@/lib/api"
+import { gitListAllBranches } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import type { GitBranchList } from "@/lib/types"
 
-interface BranchPickerBaseProps {
+interface BranchPickerProps {
   /** Folder whose branches are listed; null disables the picker. */
   folderPath: string | null
   /** Currently selected branch name ("" = the caller's own default). */
@@ -37,11 +31,11 @@ interface BranchPickerBaseProps {
    *  leaf either way). */
   onChange: (branch: string, isRemote: boolean) => void
   /** The list's "no branch chosen" entry. What that means is the caller's
-   *  (an automation falls back to the folder's default branch, a task to the
-   *  project folder's checkout), so the wording comes from the caller too.
-   *  A default that follows HEAD reads "HEAD" instead, and this wording
-   *  becomes the entry's tooltip. */
+   *  (an automation falls back to the folder's default branch, a task to
+   *  `origin`'s default branch), so the wording comes from the caller too. */
   defaultLabel: string
+  /** Trigger label while nothing is picked. */
+  placeholder: string
   /** Native tooltip / accessible name of the trigger. */
   title?: string
   disabled?: boolean
@@ -52,24 +46,6 @@ interface BranchPickerBaseProps {
    *  would only let the user build a config that fails later. */
   allowRemote?: boolean
 }
-
-type BranchPickerProps = BranchPickerBaseProps &
-  (
-    | {
-        /** Trigger label while nothing is picked. */
-        placeholder: string
-        defaultFollowsHead?: false
-      }
-    | {
-        /** The default is whatever the folder has checked out when the choice
-         *  is acted on, i.e. HEAD (a task branches from the project folder's
-         *  checkout when it starts). The entry, and the trigger while it is
-         *  the pick, then read "HEAD" beside the branch HEAD is on right now,
-         *  as the commit tab's HEAD filter does, so no placeholder is needed. */
-        defaultFollowsHead: true
-        placeholder?: never
-      }
-  )
 
 const EMPTY_LIST: GitBranchList = {
   local: [],
@@ -102,7 +78,6 @@ export function BranchPicker({
   title,
   disabled,
   allowRemote = true,
-  defaultFollowsHead = false,
 }: BranchPickerProps) {
   const t = useTranslations("BranchPicker")
   const [open, setOpen] = useState(false)
@@ -110,16 +85,6 @@ export function BranchPicker({
   const [loading, setLoading] = useState(false)
   const [query, setQuery] = useState("")
   const reqRef = useRef(0)
-
-  // The branch HEAD is on, for a default that follows HEAD. Tagged with the
-  // folder it was read from, so a folder switch never shows the previous
-  // folder's branch while the new read is in flight.
-  const [head, setHead] = useState<{
-    path: string
-    branch: string | null
-  } | null>(null)
-  const headReqRef = useRef(0)
-  const headBranch = head?.path === folderPath ? head.branch : null
 
   const loadBranches = useCallback(async () => {
     if (!folderPath) {
@@ -138,35 +103,9 @@ export function BranchPicker({
     }
   }, [folderPath])
 
-  const loadHead = useCallback(async () => {
-    if (!defaultFollowsHead || !folderPath) return
-    const id = ++headReqRef.current
-    // Null when detached (or unreadable): HEAD then names no branch, as in the
-    // commit tab, rather than a guess.
-    let branch: string | null = null
-    try {
-      branch = await getGitBranch(folderPath)
-    } catch {
-      // Keep the null.
-    }
-    if (id === headReqRef.current) setHead({ path: folderPath, branch })
-  }, [defaultFollowsHead, folderPath])
-
   useEffect(() => {
-    if (!open) return
-    void loadBranches()
-    // Re-read HEAD on every open too: the checkout may have moved since the
-    // trigger resolved it.
-    void loadHead()
-  }, [open, loadBranches, loadHead])
-
-  // While the default is the pick, the trigger names HEAD's branch, so resolve
-  // it without waiting for the list to open: on mount, on a folder switch, and
-  // whenever the pick returns to the default.
-  const triggerShowsHead = defaultFollowsHead && !value
-  useEffect(() => {
-    if (triggerShowsHead) void loadHead()
-  }, [triggerShowsHead, loadHead])
+    if (open) void loadBranches()
+  }, [open, loadBranches])
 
   // Drop the cached list when the folder changes so the next open refetches.
   useEffect(() => {
@@ -201,10 +140,7 @@ export function BranchPicker({
       ]),
     [branchList]
   )
-  // Never offer "HEAD" itself as a branch name next to the entry that follows
-  // HEAD: git refuses a branch called that, so the pick could only fail later.
-  const showUseCustom =
-    q.length > 0 && !known.has(q) && !(defaultFollowsHead && q === "HEAD")
+  const showUseCustom = q.length > 0 && !known.has(q)
 
   return (
     <Popover
@@ -223,37 +159,18 @@ export function BranchPicker({
           aria-label={title}
           className="h-7 max-w-[16rem] gap-1.5 text-xs font-normal"
         >
-          {triggerShowsHead ? (
-            <>
-              <LocateFixed
-                className="size-3.5 shrink-0 text-muted-foreground"
-                aria-hidden="true"
-              />
-              {/* "HEAD" is the label; the branch beside it is the part that
-                  gives when the trigger runs out of room. */}
-              <span className="shrink-0">{t("head")}</span>
-              {headBranch ? (
-                <span className="min-w-0 truncate text-muted-foreground">
-                  {headBranch}
-                </span>
-              ) : null}
-            </>
-          ) : (
-            <>
-              <GitBranch
-                className="size-3.5 shrink-0 text-muted-foreground"
-                aria-hidden="true"
-              />
-              <span
-                className={cn(
-                  "min-w-0 truncate",
-                  !value && "text-muted-foreground"
-                )}
-              >
-                {value || placeholder}
-              </span>
-            </>
-          )}
+          <GitBranch
+            className="size-3.5 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <span
+            className={cn(
+              "min-w-0 truncate",
+              !value && "text-muted-foreground"
+            )}
+          >
+            {value || placeholder}
+          </span>
           <ChevronDown
             className="size-3.5 shrink-0 text-muted-foreground/60"
             aria-hidden="true"
@@ -279,44 +196,21 @@ export function BranchPicker({
               <>
                 <CommandEmpty>{t("none")}</CommandEmpty>
                 <CommandGroup>
-                  {defaultFollowsHead ? (
-                    <CommandItem
-                      // Searchable by what it reads, so typing "HEAD" keeps it.
-                      value="HEAD"
-                      title={defaultLabel}
-                      onSelect={() => select("", false)}
-                    >
-                      <LocateFixed
-                        className="size-4 shrink-0 opacity-60"
-                        aria-hidden="true"
-                      />
-                      <span className="shrink-0">{t("head")}</span>
-                      {/* Always rendered, so the check stays right-aligned
-                          even while the branch is unresolved. */}
-                      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                        {headBranch}
-                      </span>
-                      {!value ? (
-                        <Check className="size-4 shrink-0" aria-hidden="true" />
-                      ) : null}
-                    </CommandItem>
-                  ) : (
-                    <CommandItem
-                      value="__default__"
-                      onSelect={() => select("", false)}
-                    >
-                      <GitBranch
-                        className="size-4 shrink-0 opacity-60"
-                        aria-hidden="true"
-                      />
-                      <span className="min-w-0 flex-1 truncate">
-                        {defaultLabel}
-                      </span>
-                      {!value ? (
-                        <Check className="size-4 shrink-0" aria-hidden="true" />
-                      ) : null}
-                    </CommandItem>
-                  )}
+                  <CommandItem
+                    value="__default__"
+                    onSelect={() => select("", false)}
+                  >
+                    <GitBranch
+                      className="size-4 shrink-0 opacity-60"
+                      aria-hidden="true"
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      {defaultLabel}
+                    </span>
+                    {!value ? (
+                      <Check className="size-4 shrink-0" aria-hidden="true" />
+                    ) : null}
+                  </CommandItem>
                 </CommandGroup>
                 {showUseCustom ? (
                   <CommandGroup>

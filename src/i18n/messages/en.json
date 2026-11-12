@@ -4519,8 +4519,7 @@
     "none": "No branches",
     "local": "Local",
     "remote": "Remote",
-    "useCustom": "Use \"{query}\"",
-    "head": "HEAD"
+    "useCustom": "Use \"{query}\""
   },
   "ChatChannelSettings": {
     "loading": "Loading...",
@@ -6288,6 +6287,7 @@
     "folderPlaceholder": "Select a folder",
     "baseBranch": "Base branch",
     "baseBranchDefault": "Default branch of origin (or the current branch if there is no origin)",
+    "baseBranchPlaceholder": "(default branch)",
     "baseBranchHint": "The task branches from here, and merging lands it back on this branch.",
     "agentInheritedHint": "Inherited from task settings — change it to override for this task",
     "agentNoDefaultHint": "No default agent in task settings — the selected agent will be saved with the task",
