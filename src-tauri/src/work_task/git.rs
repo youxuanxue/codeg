@@ -465,6 +465,10 @@ pub async fn fetch_remote_default(
                 format!("'{remote}' does not say which branch is its default"),
             )
         })?;
+    // The name comes from the remote, and it goes into a refspec next, then
+    // onto the task row and into the merge prompt: refspec syntax in it is
+    // refused, not passed along.
+    crate::commands::folders::ensure_pushable_branch_name(&branch)?;
     let refspec = format!("+refs/heads/{branch}:{local_ref}");
     let fetched = run_git_unattended(path, &["fetch", "--quiet", remote, &refspec]).await?;
     if !fetched.status.success() {
@@ -1159,6 +1163,38 @@ mod tests {
 
     /// Copying an index must keep Git's racy-clean check: a same-size edit
     /// whose stat data still matches the cached entry needs to be rehashed.
+    /// A default branch name taken from the remote goes into a refspec, so
+    /// one shaped like refspec syntax is refused before any fetch runs.
+    #[tokio::test]
+    async fn a_remote_default_with_refspec_syntax_is_refused() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let origin = home.path().join("origin");
+        std::fs::create_dir_all(&origin).expect("mkdir");
+        git_run(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("a.txt"), "one\n").expect("write");
+        git_run(&origin, &["add", "-A"]);
+        git_run(&origin, &["commit", "-q", "-m", "base"]);
+        // A name `git branch` refuses to create, written as a raw ref: the
+        // remote is not ours, so what it reports is not ours to trust.
+        git_run(&origin, &["update-ref", "refs/heads/-x", "HEAD"]);
+        git_run(&origin, &["symbolic-ref", "HEAD", "refs/heads/-x"]);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        git_run(&repo, &["init", "-q", "-b", "main"]);
+        git_run(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+
+        let err = fetch_remote_default(repo.to_str().unwrap(), "origin", "refs/codeg/t/default")
+            .await
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("Invalid branch name"), "{err}");
+        assert!(
+            rev_parse(repo.to_str().unwrap(), "refs/codeg/t/default")
+                .await
+                .is_err(),
+            "nothing was fetched"
+        );
+    }
+
     #[tokio::test]
     async fn a_copied_index_still_stages_a_racily_clean_edit() {
         let dir = tempfile::tempdir().expect("tempdir");
