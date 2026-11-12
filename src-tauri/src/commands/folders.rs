@@ -3478,14 +3478,29 @@ pub async fn git_remove_worktree_core(
         let mut args = vec!["worktree", "remove"];
         if force {
             args.push("--force");
+            args.push("--force");
         }
         args.push(&worktree_path);
-        let removed = crate::process::tokio_command("git")
+        let mut removed = crate::process::tokio_command("git")
             .args(&args)
             .current_dir(&repo_path)
             .output()
             .await
             .map_err(AppCommandError::io)?;
+        if !removed.status.success()
+            && !force
+            && String::from_utf8_lossy(&removed.stderr)
+                .to_ascii_lowercase()
+                .contains("containing submodules cannot be moved or removed")
+            && is_worktree_clean(&worktree_path).await
+        {
+            removed = crate::process::tokio_command("git")
+                .args(["worktree", "remove", "--force", "--force", &worktree_path])
+                .current_dir(&repo_path)
+                .output()
+                .await
+                .map_err(AppCommandError::io)?;
+        }
         if !removed.status.success() {
             if Path::new(&worktree_path).exists() {
                 return Err(git_command_error("worktree remove", &removed.stderr));
@@ -3502,6 +3517,7 @@ pub async fn git_remove_worktree_core(
                 return Err(git_command_error("worktree prune", &pruned.stderr));
             }
         }
+        prune_submodule_worktree_registrations(&repo_path).await;
         removal.worktree_path = Some(worktree_path.clone());
 
         // Only the "delete everything" variant drops the folder: removing just
@@ -3536,12 +3552,23 @@ pub async fn git_remove_worktree_core(
 
     if delete_branch {
         let flag = if force { "-D" } else { "-d" };
-        let deleted = crate::process::tokio_command("git")
+        let mut deleted = crate::process::tokio_command("git")
             .args(["branch", flag, &branch_name])
             .current_dir(&repo_path)
             .output()
             .await
             .map_err(AppCommandError::io)?;
+        if !deleted.status.success()
+            && !force
+            && is_branch_patch_merged(&repo_path, &branch_name).await
+        {
+            deleted = crate::process::tokio_command("git")
+                .args(["branch", "-D", &branch_name])
+                .current_dir(&repo_path)
+                .output()
+                .await
+                .map_err(AppCommandError::io)?;
+        }
         if !deleted.status.success() {
             // "not found" means an earlier attempt already got it.
             let stderr = String::from_utf8_lossy(&deleted.stderr).to_lowercase();
@@ -3556,6 +3583,108 @@ pub async fn git_remove_worktree_core(
     }
 
     Ok(removal)
+}
+
+async fn is_worktree_clean(worktree_path: &str) -> bool {
+    crate::process::tokio_command("git")
+        .args(["status", "--porcelain"])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .is_ok_and(|out| out.status.success() && out.stdout.is_empty())
+}
+
+async fn is_branch_patch_merged(repo_path: &str, branch_name: &str) -> bool {
+    for base in ["origin/main", "origin/master", "main", "master"] {
+        let Ok(verify) = crate::process::tokio_command("git")
+            .args(["rev-parse", "--verify", base])
+            .current_dir(repo_path)
+            .output()
+            .await
+        else {
+            continue;
+        };
+        if !verify.status.success() {
+            continue;
+        }
+        let Ok(cherry) = crate::process::tokio_command("git")
+            .args(["cherry", base, branch_name])
+            .current_dir(repo_path)
+            .output()
+            .await
+        else {
+            continue;
+        };
+        if !cherry.status.success() {
+            continue;
+        }
+        let lines: Vec<String> = String::from_utf8_lossy(&cherry.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !lines.is_empty() && lines.iter().all(|line| line.starts_with("- ")) {
+            return true;
+        }
+    }
+    false
+}
+
+async fn prune_submodule_worktree_registrations(repo_path: &str) {
+    let Ok(common) = crate::process::tokio_command("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(repo_path)
+        .output()
+        .await
+    else {
+        return;
+    };
+    if !common.status.success() {
+        return;
+    }
+    let raw = String::from_utf8_lossy(&common.stdout).trim().to_string();
+    if raw.is_empty() {
+        return;
+    }
+    let common_path = {
+        let p = PathBuf::from(&raw);
+        if p.is_absolute() {
+            p
+        } else {
+            Path::new(repo_path).join(p)
+        }
+    };
+    let modules_dir = common_path.join("modules");
+    if !modules_dir.is_dir() {
+        return;
+    }
+    let mut stack = vec![modules_dir];
+    while let Some(dir) = stack.pop() {
+        if dir.join("HEAD").is_file() && dir.join("config").is_file() {
+            let _ = crate::process::tokio_command("git")
+                .arg("--git-dir")
+                .arg(&dir)
+                .args(["worktree", "prune"])
+                .output()
+                .await;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                continue;
+            }
+            if matches!(
+                entry.file_name().to_str(),
+                Some("objects" | "refs" | "hooks" | "info" | "logs" | "worktrees")
+            ) {
+                continue;
+            }
+            stack.push(entry.path());
+        }
+    }
 }
 
 /// Where a removed worktree folder's conversations belong: the root repo folder
@@ -8454,6 +8583,44 @@ mod tests {
         );
         let branches = git_list_all_branches(repo).await.expect("branches");
         assert!(branches.local.contains(&"main".to_string()));
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_deletes_squash_merged_branch_without_force() {
+        let db = fresh_in_memory_db().await;
+        let (_dir, repo, wt_path) = repo_with_worktree();
+
+        // Commit a change on the worktree branch `wt`.
+        std::fs::write(Path::new(&wt_path).join("feature.txt"), "squash payload\n")
+            .expect("write feature");
+        git_run(Path::new(&wt_path), &["add", "feature.txt"]);
+        git_run(Path::new(&wt_path), &["commit", "-q", "-m", "feat: add feature"]);
+
+        // Simulate a GitHub squash-merge onto `main` (same patch, distinct commit SHA).
+        std::fs::write(Path::new(&repo).join("feature.txt"), "squash payload\n")
+            .expect("write squashed feature");
+        git_run(Path::new(&repo), &["add", "feature.txt"]);
+        git_run(
+            Path::new(&repo),
+            &["commit", "-q", "-m", "feat: add feature (#1)"],
+        );
+
+        let removal = git_remove_worktree_core(
+            &test_emitter(),
+            &db,
+            repo.clone(),
+            "wt".into(),
+            0,
+            true,
+            false,
+        )
+        .await
+        .expect("squash-merged worktree + branch removal should succeed without force");
+
+        assert!(removal.branch_deleted);
+        assert!(!Path::new(&wt_path).exists());
+        let branches = git_list_all_branches(repo).await.expect("branches");
+        assert!(!branches.local.contains(&"wt".to_string()));
     }
 
     #[test]
