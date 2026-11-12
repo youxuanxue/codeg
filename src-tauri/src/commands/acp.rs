@@ -3887,6 +3887,18 @@ fn codex_config_projection_from_toml(raw_toml: &str) -> serde_json::Map<String, 
         );
     }
 
+    if let Some(catalog_path) = value
+        .get("model_catalog_json")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        merged.insert(
+            "modelCatalogJson".to_string(),
+            serde_json::Value::String(catalog_path.to_string()),
+        );
+    }
+
     let model_provider = value
         .get("model_provider")
         .and_then(|item| item.as_str())
@@ -3902,11 +3914,19 @@ fn codex_config_projection_from_toml(raw_toml: &str) -> serde_json::Map<String, 
     }
 
     let mut api_base_url: Option<String> = None;
+    let mut bearer_token: Option<String> = None;
     if let Some(provider) = &model_provider {
-        api_base_url = value
+        let provider_table = value
             .get("model_providers")
-            .and_then(|table| table.get(provider.as_str()))
+            .and_then(|table| table.get(provider.as_str()));
+        api_base_url = provider_table
             .and_then(|table| table.get("base_url"))
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_string);
+        bearer_token = provider_table
+            .and_then(|table| table.get("experimental_bearer_token"))
             .and_then(|item| item.as_str())
             .map(str::trim)
             .filter(|item| !item.is_empty())
@@ -3931,6 +3951,9 @@ fn codex_config_projection_from_toml(raw_toml: &str) -> serde_json::Map<String, 
             "apiBaseUrl".to_string(),
             serde_json::Value::String(base_url),
         );
+    }
+    if let Some(token) = bearer_token {
+        merged.insert("apiKey".to_string(), serde_json::Value::String(token));
     }
 
     if let Some(env) = value.get("env").and_then(|item| item.as_table()) {
@@ -11715,6 +11738,36 @@ pub(crate) fn cc_switch_gemini_model_catalog(
     )
 }
 
+/// Model ids from the cc-switch unified Pi catalog that backs Codex's active
+/// provider credentials (`OPENAI_BASE_URL` / `OPENAI_API_KEY` or the active
+/// `[model_providers.<id>]` entry in `~/.codex/config.toml`).
+pub(crate) fn cc_switch_codex_model_catalog(
+    runtime_env: &BTreeMap<String, String>,
+) -> Vec<(String, String, Option<String>)> {
+    let toml_projection = load_codex_config_toml_for_env(runtime_env)
+        .map(|raw| codex_config_projection_from_toml(&raw))
+        .unwrap_or_default();
+    let resolve = |env_key: &str, proj_key: &str| -> Option<String> {
+        runtime_env
+            .get(env_key)
+            .map(String::as_str)
+            .or_else(|| toml_projection.get(proj_key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let base_url = resolve("OPENAI_BASE_URL", "apiBaseUrl")
+        .map(|value| normalize_catalog_url(&value));
+    let api_key = resolve("OPENAI_API_KEY", "apiKey");
+    cc_switch_model_catalog_for(
+        runtime_env,
+        base_url,
+        api_key.as_deref(),
+        provider_serves_codex_gateway,
+        codex_picker_catalog_id,
+    )
+}
+
 fn cc_switch_model_catalog_for(
     runtime_env: &BTreeMap<String, String>,
     base_url: Option<String>,
@@ -11810,6 +11863,25 @@ fn load_gemini_dotenv_raw(runtime_env: &BTreeMap<String, String>) -> Option<Stri
     std::fs::read_to_string(path).ok()
 }
 
+fn load_codex_config_toml_for_env(runtime_env: &BTreeMap<String, String>) -> Option<String> {
+    let home = runtime_env
+        .get("CODEX_HOME")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            if value == "~" {
+                home_dir_or_default()
+            } else if let Some(remain) = value.strip_prefix("~/") {
+                home_dir_or_default().join(remain)
+            } else {
+                PathBuf::from(value)
+            }
+        })
+        .unwrap_or_else(codex_home_dir);
+    std::fs::read_to_string(home.join("config.toml")).ok()
+}
+
 fn parse_dotenv_vars(raw: &str) -> BTreeMap<String, String> {
     let mut vars = BTreeMap::new();
     for line in raw.lines() {
@@ -11894,6 +11966,41 @@ fn gemini_picker_catalog_id(id: &str, gemini_gateway: bool) -> bool {
 fn is_gemini_catalog_id(id: &str) -> bool {
     let leaf = id.rsplit(['/', ':']).next().unwrap_or(id);
     leaf.starts_with("gemini-")
+}
+
+/// Whether `provider` backs an OpenAI/Codex or universal cc-switch gateway.
+/// cc-switch stores universal providers (such as TokenKey Fullkey) under
+/// `"api": "anthropic-messages"` in Pi's `models.json` while simultaneously
+/// routing Codex's `[model_providers.custom].base_url` to the same gateway.
+fn provider_serves_codex_gateway(provider: &serde_json::Value) -> bool {
+    match provider
+        .get("api")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    {
+        None | Some("") => true,
+        Some(
+            "openai-responses"
+            | "openai-completions"
+            | "openai"
+            | "anthropic-messages"
+            | "anthropic",
+        ) => true,
+        Some(_) => false,
+    }
+}
+
+fn codex_picker_catalog_id(id: &str, codex_gateway: bool) -> bool {
+    is_codex_catalog_id(id) || codex_gateway
+}
+
+fn is_codex_catalog_id(id: &str) -> bool {
+    let leaf = id.rsplit(['/', ':']).next().unwrap_or(id);
+    leaf.starts_with("gpt-")
+        || leaf.starts_with("codex-")
+        || leaf.starts_with("o1")
+        || leaf.starts_with("o3")
+        || leaf.starts_with("o4")
 }
 
 /// A Claude model id, including a Bedrock-style `….anthropic.claude-…` spelling.
@@ -25065,6 +25172,90 @@ model = "gpt"
             .expect("write second .env");
         let second_fp = fingerprint_config(AgentType::Gemini, &env);
         assert_ne!(first_fp, second_fp);
+    }
+
+    #[test]
+    fn cc_switch_codex_model_catalog_reads_config_toml_bearer_token_and_filters_google_only_provider(
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pi_dir = dir.path().join("pi");
+        let codex_dir = dir.path().join("codex");
+        std::fs::create_dir_all(&pi_dir).expect("create pi dir");
+        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+        std::fs::write(
+            pi_dir.join("models.json"),
+            serde_json::json!({
+                "providers": {
+                    "universal-pi-tokenkey-fullkey": {
+                        "name": "TokenKey Fullkey",
+                        "baseUrl": "https://api.tokenkey.dev",
+                        "api": "anthropic-messages",
+                        "apiKey": "sk-codex-tokenkey",
+                        "models": [
+                            {"id": "gpt-6.1", "name": "gpt-6.1"},
+                            {"id": "claude-opus-5-5", "name": "claude-opus-5-5"},
+                            {"id": "gemini-4-argon", "name": "gemini-4-argon"}
+                        ]
+                    },
+                    "google-only": {
+                        "baseUrl": "https://api.tokenkey.dev",
+                        "api": "google-generative-ai",
+                        "apiKey": "sk-codex-tokenkey",
+                        "models": [
+                            {"id": "gemini-2.5-pro", "name": "Gemini Pro"},
+                            {"id": "openai/gpt-5.6", "name": "GPT 5.6"}
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write models.json");
+        let toml = r#"
+model_provider = "custom"
+model = "gpt-6.1"
+model_catalog_json = "cc-switch-model-catalog.json"
+
+[model_providers.custom]
+name = "NewAPI"
+base_url = "https://api.tokenkey.dev/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "sk-codex-tokenkey"
+"#;
+        std::fs::write(codex_dir.join("config.toml"), toml).expect("write config.toml");
+
+        let proj = codex_config_projection_from_toml(toml);
+        assert_eq!(
+            proj.get("modelCatalogJson").and_then(serde_json::Value::as_str),
+            Some("cc-switch-model-catalog.json")
+        );
+        assert_eq!(
+            proj.get("apiKey").and_then(serde_json::Value::as_str),
+            Some("sk-codex-tokenkey")
+        );
+
+        let mut env = BTreeMap::new();
+        env.insert(
+            "PI_CODING_AGENT_DIR".to_string(),
+            pi_dir.to_string_lossy().to_string(),
+        );
+        env.insert(
+            "CODEX_HOME".to_string(),
+            codex_dir.to_string_lossy().to_string(),
+        );
+
+        let rows = cc_switch_codex_model_catalog(&env);
+        let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "claude-opus-5-5",
+                "gemini-4-argon",
+                "gpt-6.1",
+                "openai/gpt-5.6",
+            ]
+        );
     }
 
     #[tokio::test]
