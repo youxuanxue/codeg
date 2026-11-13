@@ -47,6 +47,11 @@ import type {
   WorkTaskTemplate,
 } from "@/lib/types"
 
+/** The agent the engine launches a task with when nothing names one
+ *  (`FALLBACK_AGENT` in `work_task/engine.rs`). Shown as the placeholder when
+ *  there is nothing to inherit, so the pill says what would actually run. */
+const FALLBACK_AGENT: AgentType = "cursor"
+
 interface TaskEditorDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -138,7 +143,7 @@ function TaskEditorBody({
   // the draft keeps inheriting (agent_type null) — nothing is frozen.
   const [agentDirty, setAgentDirty] = useState(task?.config?.agent_type != null)
   const [agentType, setAgentType] = useState<AgentType>(
-    task?.config?.agent_type ?? "claude_code"
+    task?.config?.agent_type ?? FALLBACK_AGENT
   )
   // What an agent-less task launches with in this folder, resolved the way the
   // engine does it: the effective task settings' agent, else the folder's
@@ -209,9 +214,10 @@ function TaskEditorBody({
         if (cancelled) return
         const agent = s.default_agent_type ?? folderDefaultAgent ?? null
         setInherited({ folderId, agent })
-        // Nothing to inherit: a placeholder, which a save keeps rather than
-        // inherits (see `pinsShownAgent`).
-        setAgentType(agent ?? "claude_code")
+        // Nothing to inherit: the engine's own fallback, shown as a
+        // placeholder that a save keeps rather than inherits (see
+        // `pinsShownAgent`).
+        setAgentType(agent ?? FALLBACK_AGENT)
         setModeId(s.mode_id ?? null)
         setConfigValues(s.config_values ?? {})
       })
