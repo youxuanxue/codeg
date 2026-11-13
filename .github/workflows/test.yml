@@ -113,8 +113,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        # Pinned, not `@stable`: a new stable ships new clippy lints, and every
+        # branch's CI turns red on the day it lands, over code nobody touched
+        # (1.100.0 did exactly that to `experts.rs`, 2026-11-13). To upgrade,
+        # change this version in a PR of its own, so its lints are fixed
+        # where they are seen. `release.yml` builds the shipped binaries and
+        # still floats; keep it in step if the two should ever differ less.
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy
 
@@ -149,10 +155,13 @@ jobs:
         run: cargo test ${{ matrix.cargo_args }}
 
       - name: cargo clippy
-        # Clippy on each (os, mode) cell — desktop covers tauri-only code
-        # paths plus integration tests, server covers cfg-gated server-only
-        # code. Treat warnings as errors now that the 8 pre-existing
-        # advisories are cleared.
+        # Clippy on the server and cli cells — server covers cfg-gated
+        # server-only code. Treat warnings as errors now that the 8
+        # pre-existing advisories are cleared. The desktop cell is linted by
+        # `rust-desktop-clippy` below, in parallel: it is the longest cell,
+        # and its lint (tauri-only code plus the integration tests) shares no
+        # build output with its tests.
+        if: matrix.mode != 'desktop'
         working-directory: src-tauri
         run: cargo clippy ${{ matrix.clippy_args }} -- -D warnings
 
@@ -177,6 +186,46 @@ jobs:
         # skill works when Codeg has to copy only one skill on Windows.
         if: matrix.mode == 'desktop'
         run: bash scripts/test-superpowers-skill-layouts.sh
+
+  rust-desktop-clippy:
+    # The desktop lint, split from the desktop tests so the two run side by
+    # side (the cell's tests are the longest job in the run). Same scope as
+    # before: `--all-targets` with `test-utils`, so tauri-only code and the
+    # integration tests are linted. `check`-profile output cannot be reused by
+    # the test build, so this job keeps a cache of its own.
+    name: Rust desktop clippy on ubuntu-22.04
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        # Same pin as the `rust` job above; change both together.
+        uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: clippy-ubuntu-22.04-desktop
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Prepare Tauri frontendDist placeholder
+        run: |
+          mkdir -p out
+          printf '<!doctype html><html><body></body></html>\n' > out/index.html
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --features test-utils -- -D warnings
 
   local-deploy:
     name: local deploy script
