@@ -88,9 +88,8 @@ jobs:
             # under `tests/`. Without the flag those items are physically
             # uncompiled, so integration tests would fail to link.
             cargo_args: "--features test-utils"
-            # Desktop clippy must lint integration tests too, so it picks up
-            # `--all-targets`. test-utils is already on, so tests compile.
-            clippy_args: "--all-targets --features test-utils"
+            # No `clippy_args`: the desktop lint runs in `rust-desktop-clippy`,
+            # which lints the integration tests too (`--all-targets`).
           - mode: server
             # Server build is feature-gated off the Tauri runtime; no
             # need for webkit/appindicator system libs. `--lib` skips
