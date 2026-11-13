@@ -214,7 +214,12 @@ function TaskEditorBody({
   useEffect(() => {
     if (agentDirty || folderId == null) return
     let cancelled = false
-    Promise.all([workTaskSettingsEffective(folderId), workTaskFallbackAgent()])
+    Promise.all([
+      workTaskSettingsEffective(folderId),
+      // Only read when nothing is inherited; failing to read it must not stop
+      // the inherited settings from loading.
+      workTaskFallbackAgent().catch(() => null),
+    ])
       .then(([s, fallback]) => {
         if (cancelled) return
         const agent = s.default_agent_type ?? folderDefaultAgent ?? null
@@ -222,7 +227,9 @@ function TaskEditorBody({
         // Nothing to inherit: the backend's own fallback, shown as a
         // placeholder that a save keeps rather than inherits (see
         // `pinsShownAgent`). Read from the backend, never spelled here.
-        setAgentType(agent ?? fallback)
+        // With neither an inherited agent nor the fallback, keep what the pill
+        // already shows rather than blanking it.
+        setAgentType((current) => agent ?? fallback ?? current)
         setModeId(s.mode_id ?? null)
         setConfigValues(s.config_values ?? {})
       })

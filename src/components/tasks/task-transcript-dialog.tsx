@@ -126,17 +126,19 @@ function TaskAgentResolver({ task }: { task: WorkTask }) {
   useEffect(() => {
     if (override != null) return
     let cancelled = false
-    // The backend names the last-resort agent; this view never spells one.
-    const fallback = workTaskFallbackAgent()
+    // The backend names the last-resort agent; this view never spells one. A
+    // failed read is `null`, so it neither rejects unhandled nor blocks the
+    // transcript when a nearer layer already names the agent.
+    const fallback = workTaskFallbackAgent().catch(() => null)
     getFolderConversation(conversationId)
       .then(async (detail) => {
         const agent =
           detail.summary.agent_type ?? folderDefault ?? (await fallback)
-        if (!cancelled) setResolved(agent)
+        if (!cancelled && agent != null) setResolved(agent)
       })
       .catch(async () => {
         // Transcript unreadable (agent gone, file pruned) — best-effort.
-        const agent = folderDefault ?? (await fallback.catch(() => null))
+        const agent = folderDefault ?? (await fallback)
         if (!cancelled && agent != null) setResolved(agent)
       })
     return () => {

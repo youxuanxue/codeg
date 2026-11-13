@@ -21,6 +21,8 @@ const inheritance = vi.hoisted(() => ({
   folderDefault: null as string | null,
   // What the backend says it launches an agent-less task with.
   fallback: "cursor" as string,
+  // Make the fallback read fail, as a backend that predates the command would.
+  fallbackFails: false,
 }))
 const templateSave = vi.hoisted(() => vi.fn())
 // The config selections each probe host passed on its latest render: the
@@ -40,7 +42,10 @@ vi.mock("@/lib/api", () => ({
     }),
   getGitBranch: () => Promise.resolve("main"),
   // The backend owns the fallback; the test only plays its answer.
-  workTaskFallbackAgent: () => Promise.resolve(inheritance.fallback),
+  workTaskFallbackAgent: () =>
+    inheritance.fallbackFails
+      ? Promise.reject(new Error("no such command"))
+      : Promise.resolve(inheritance.fallback),
   workTaskSettingsEffective: () =>
     Promise.resolve({
       default_agent_type: inheritance.settingsAgent,
@@ -298,6 +303,7 @@ beforeEach(() => {
   inheritance.settingsModeId = null
   inheritance.settingsConfig = {}
   inheritance.fallback = "cursor"
+  inheritance.fallbackFails = false
   inheritance.folderDefault = null
   templateSave.mockReset().mockResolvedValue(undefined)
   probeSelections.bar = []
@@ -367,6 +373,19 @@ describe("TaskEditorDialog agent", () => {
 
     const config = await saveBrief(user, onSubmit)
     expect(config.agent_type).toBe("codex")
+  })
+
+  it("a failed fallback read does not stop the inherited agent from loading", async () => {
+    inheritance.fallbackFails = true
+    inheritance.settingsAgent = "codex"
+    registry(agent("cursor"), agent("codex"))
+    const user = userEvent.setup()
+    const onSubmit = renderEditor()
+    await shownAgent("Codex")
+    expect(await screen.findByText(INHERITED_HINT)).toBeInTheDocument()
+
+    const config = await saveBrief(user, onSubmit)
+    expect(config.agent_type).toBeNull()
   })
 
   it("an untouched pill with an inherited agent saves as inherit, never the first-paint placeholder", async () => {

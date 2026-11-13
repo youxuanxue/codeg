@@ -253,7 +253,9 @@ function TaskSettingsBody({
       isGlobal
         ? Promise.resolve([])
         : listFolderCommands(folderId).catch(() => []),
-      workTaskFallbackAgent(),
+      // Only read when nothing names an agent; failing to read it must not
+      // take the rest of the form down with it.
+      workTaskFallbackAgent().catch(() => null),
     ])
       .then(([own, global, commands, fallback]) => {
         if (cancelled) return
@@ -261,7 +263,7 @@ function TaskSettingsBody({
         setLoaded(s)
         setSource(isGlobal || own != null ? "custom" : "global")
         setAgentType(
-          s.default_agent_type ?? folder?.default_agent_type ?? fallback
+          s.default_agent_type ?? folder?.default_agent_type ?? fallback ?? ""
         )
         setModeId(s.mode_id ?? null)
         setConfigValues(s.config_values ?? {})
