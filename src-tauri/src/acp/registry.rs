@@ -4499,7 +4499,14 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
                 version: "0.60.0",
                 package: "@google/gemini-cli@0.60.0",
                 cmd: "gemini",
-                args: &["--acp", "--skip-trust"],
+                // `--acp` is the protocol. `--skip-trust` sets
+                // GEMINI_CLI_TRUST_WORKSPACE=true; an untrusted folder makes
+                // Gemini downgrade any non-default approval mode back to
+                // `default` before the session starts. `--approval-mode=yolo`
+                // is the only way Gemini accepts YOLO (settings.json refuses
+                // it) and is what keeps tool calls from becoming
+                // `session/request_permission`. Sandbox stays opt-in.
+                args: &["--acp", "--skip-trust", "--approval-mode=yolo"],
                 env: &[],
                 node_required: Some("20.0.0"),
             },
@@ -8082,6 +8089,19 @@ mod tests {
             panic!("Claude Code is an npx agent");
         };
         assert_eq!(package, format!("{CLAUDE_AGENT_ACP_PACKAGE}@{version}"));
+    }
+
+    #[test]
+    fn gemini_launch_starts_in_yolo() {
+        // YOLO is a launch flag, not a settings.json key. Dropping
+        // `--skip-trust` would make Gemini ignore it and ask again.
+        let AgentDistribution::Npx { cmd, args, .. } =
+            get_agent_meta(AgentType::Gemini).distribution
+        else {
+            panic!("Gemini is an npx agent");
+        };
+        assert_eq!(cmd, "gemini");
+        assert_eq!(args, &["--acp", "--skip-trust", "--approval-mode=yolo"]);
     }
 
     #[test]
