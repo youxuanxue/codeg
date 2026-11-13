@@ -11,6 +11,7 @@ use crate::db::entities::work_task::WorkTaskStatus;
 use crate::db::error::DbError;
 use crate::db::service::work_task_service;
 use crate::db::AppDatabase;
+use crate::models::agent::AgentType;
 use crate::models::{
     FollowUpIntent, WorkTaskChangedFile, WorkTaskDraft, WorkTaskEventInfo, WorkTaskFolderSettings,
     WorkTaskInfo, WorkTaskTemplateDraft, WorkTaskTemplateInfo,
@@ -205,7 +206,7 @@ async fn annotate_agent_type(db: &AppDatabase, infos: &mut [WorkTaskInfo]) -> Re
             .or(own_override)
             .or(from_settings)
             .or_else(|| folder_defaults.get(&info.folder_id).cloned())
-            .or_else(|| Some(crate::work_task::FALLBACK_AGENT.to_string()));
+            .or_else(|| Some(AgentType::FALLBACK.as_wire().into_owned()));
     }
     Ok(())
 }
@@ -822,6 +823,12 @@ pub async fn work_task_settings_effective_core(
     work_task_service::settings_get_effective(&db.conn, folder_id).await
 }
 
+/// The agent a task runs with when neither the task nor its folder names one.
+/// The frontend reads it here instead of keeping a copy of the name.
+pub fn work_task_fallback_agent_core() -> String {
+    AgentType::FALLBACK.as_wire().into_owned()
+}
+
 /// The folder's own settings row, or `None` when it follows the global
 /// defaults — the settings dialog's source-of-truth probe.
 pub async fn work_task_settings_get_own_core(
@@ -1160,6 +1167,12 @@ pub async fn work_task_settings_get(
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn work_task_fallback_agent() -> Result<String, DbError> {
+    Ok(work_task_fallback_agent_core())
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn work_task_settings_effective(
     db: tauri::State<'_, AppDatabase>,
     folder_id: i32,
@@ -1322,7 +1335,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             agent_of(&db, task.id).await.as_deref(),
-            Some(crate::work_task::FALLBACK_AGENT)
+            Some(AgentType::FALLBACK.as_wire().as_ref())
         );
 
         // The global settings row is what a folder without its own follows.

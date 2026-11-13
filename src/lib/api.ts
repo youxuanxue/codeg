@@ -4344,6 +4344,12 @@ export async function workTaskChangedFiles(
   return getTransport().call("work_task_changed_files", { id })
 }
 
+/** The agent a task or chat request runs with when nothing names one. Read
+ *  from the backend, which owns the value (`AgentType::FALLBACK`). */
+export async function workTaskFallbackAgent(): Promise<AgentType> {
+  return getTransport().call("work_task_fallback_agent")
+}
+
 /** Effective settings after the folder → global → built-in fallback — what
  *  the engine will actually use for this folder. */
 export async function workTaskSettingsEffective(

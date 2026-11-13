@@ -7,8 +7,13 @@ import type { WorkTask, WorkTaskDraft } from "@/lib/types"
 
 const branchesMock = vi.fn()
 
+vi.mock("@/hooks/use-acp-agents", () => ({
+  useAcpAgents: () => ({ agents: [], fresh: true, refresh: () => {} }),
+}))
+
 vi.mock("@/lib/api", () => ({
   gitListAllBranches: (...args: unknown[]) => branchesMock(...args),
+  workTaskFallbackAgent: () => Promise.resolve("cursor"),
   workTaskSettingsEffective: () =>
     Promise.resolve({
       default_agent_type: null,

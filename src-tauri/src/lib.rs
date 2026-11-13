@@ -2326,6 +2326,7 @@ mod tauri_app {
                 work_task_commands::work_task_changed_files,
                 work_task_commands::work_task_settings_get,
                 work_task_commands::work_task_settings_get_own,
+                work_task_commands::work_task_fallback_agent,
                 work_task_commands::work_task_settings_effective,
                 work_task_commands::work_task_settings_set,
                 work_task_commands::work_task_settings_delete,

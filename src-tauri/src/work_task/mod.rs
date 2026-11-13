@@ -9,4 +9,4 @@ pub mod git;
 pub use engine::{
     build_task_engine, engine, run_task_engine, CleanupBlocked, EngineWorkTaskTools, TaskEngine,
 };
-pub(crate) use engine::{worktree_kept, FALLBACK_AGENT};
+pub(crate) use engine::worktree_kept;

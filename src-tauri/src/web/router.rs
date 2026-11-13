@@ -1954,6 +1954,10 @@ pub fn build_router_with_proxy_auth(
             post(handlers::work_task::work_task_settings_effective),
         )
         .route(
+            "/work_task_fallback_agent",
+            post(handlers::work_task::work_task_fallback_agent),
+        )
+        .route(
             "/work_task_settings_get_own",
             post(handlers::work_task::work_task_settings_get_own),
         )

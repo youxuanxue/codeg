@@ -74,6 +74,12 @@ pub const BUILTIN_AGENT_TYPES: &[AgentType] = &[
 ];
 
 impl AgentType {
+    /// The agent a task or chat request runs with when nothing names one —
+    /// the single source of truth for that fallback. Every launch path, the
+    /// list's agent marks and the frontend (through `work_task_fallback_agent`)
+    /// read this constant; nothing else may spell the name.
+    pub const FALLBACK: AgentType = AgentType::Cursor;
+
     /// True for a user-registered agent.
     pub fn is_custom(&self) -> bool {
         matches!(self, AgentType::Custom(_))

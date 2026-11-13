@@ -549,15 +549,7 @@ pub async fn handle_task(
     };
 
     // 3. Resolve agent type
-    let agent_type = match resolve_agent_type(&ctx.current_agent_type, &folder.default_agent_type) {
-        Some(at) => at,
-        None => {
-            return CommandMessageResult::current_target(
-                RichMessage::info(i18n::no_agent_selected(lang, prefix)),
-                target,
-            );
-        }
-    };
+    let agent_type = resolve_agent_type(&ctx.current_agent_type, &folder.default_agent_type);
 
     let runtime_env = match build_chat_session_runtime_env(db, agent_type, None, data_dir).await {
         Ok(env) => env,
@@ -1769,16 +1761,19 @@ fn parse_agent_type(name: &str) -> Option<AgentType> {
     }
 }
 
+/// The sender's own pick, else the folder's default agent, else
+/// [`AgentType::FALLBACK`] — the same last resort a board task uses, so a
+/// request in a folder nobody configured still starts.
 fn resolve_agent_type(
     sender_agent: &Option<String>,
     folder_default: &Option<AgentType>,
-) -> Option<AgentType> {
+) -> AgentType {
     if let Some(ref at_str) = sender_agent {
         if let Some(at) = parse_agent_type(at_str) {
-            return Some(at);
+            return at;
         }
     }
-    folder_default.as_ref().copied()
+    folder_default.as_ref().copied().unwrap_or(AgentType::FALLBACK)
 }
 
 fn truncate_title(s: &str) -> String {
@@ -1792,6 +1787,28 @@ fn truncate_title(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_request_with_no_agent_anywhere_uses_the_fallback() {
+        // Neither the sender nor the folder names one: the same last resort a
+        // board task uses, not a refusal.
+        assert_eq!(resolve_agent_type(&None, &None), AgentType::FALLBACK);
+        // A sender pick that does not parse is not a pick.
+        assert_eq!(
+            resolve_agent_type(&Some("no-such-agent".to_string()), &None),
+            AgentType::FALLBACK
+        );
+    }
+
+    #[test]
+    fn the_senders_pick_beats_the_folder_default_which_beats_the_fallback() {
+        let folder = Some(AgentType::Codex);
+        assert_eq!(resolve_agent_type(&None, &folder), AgentType::Codex);
+        assert_eq!(
+            resolve_agent_type(&Some("claude_code".to_string()), &folder),
+            AgentType::ClaudeCode
+        );
+    }
+
     use super::*;
     use crate::acp::connection::ConnectionCommand;
     use crate::chat_channel::session_bridge::PendingPermission;
