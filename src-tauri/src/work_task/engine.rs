@@ -1223,17 +1223,20 @@ impl TaskEngine {
             .map_err(|e| e.to_string())?;
 
         // Effective agent + config: task override > folder task settings >
-        // folder default agent. Audited via a config_effective event (values
-        // are inherited live, never frozen).
+        // folder default agent > `FALLBACK_AGENT`. Audited via a
+        // config_effective event (values are inherited live, never frozen).
         let cfg: WorkTaskConfig =
             serde_json::from_str(&task.config).unwrap_or_default();
         let settings = work_task_service::settings_get_effective(&self.db.conn, task.folder_id)
             .await
             .unwrap_or_default();
-        let (agent_str, mode_id, config_values) = effective_agent_config(&cfg, &settings, &root);
-        let agent_str = agent_str.ok_or_else(|| {
-            "no agent configured: set a task agent or a folder default".to_string()
-        })?;
+        let (configured_agent, mode_id, config_values) =
+            effective_agent_config(&cfg, &settings, &root);
+        // Nothing names an agent: fall back instead of refusing, so a task in
+        // a folder nobody configured still runs. Remembered, because a failure
+        // to start must say the agent was a guess rather than a setting.
+        let used_fallback_agent = configured_agent.is_none();
+        let agent_str = configured_agent.unwrap_or_else(|| FALLBACK_AGENT.to_string());
         let agent_type = parse_agent_type(&agent_str)?;
 
         // Cheap validation before any side effects; the full prompt is composed
@@ -1307,6 +1310,7 @@ impl TaskEngine {
             "engine",
             Some(serde_json::json!({
                 "agent": agent_str,
+                "fallback": used_fallback_agent,
                 "mode": mode_id,
                 "model": config_values.get("model"),
             })),
@@ -1390,9 +1394,15 @@ impl TaskEngine {
                         config_values.clone(),
                     )
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| with_fallback_agent_note(e.to_string(), used_fallback_agent, &agent_str))?
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                return Err(with_fallback_agent_note(
+                    e.to_string(),
+                    used_fallback_agent,
+                    &agent_str,
+                ))
+            }
         };
 
         // Conversation row: reuse when resuming the same session; otherwise a
@@ -7308,8 +7318,26 @@ fn chosen_base_branch(task: &crate::db::entities::work_task::Model) -> Option<St
         .filter(|b| !b.is_empty())
 }
 
+/// The agent a task runs with when neither the task, the folder's task
+/// settings nor the folder names one.
+pub(crate) const FALLBACK_AGENT: &str = "cursor";
+
+/// Say that the agent was the fallback when it fails to start, so the error
+/// does not read as a choice the user made.
+fn with_fallback_agent_note(error: String, used_fallback: bool, agent: &str) -> String {
+    if used_fallback {
+        format!(
+            "{error} (no agent was configured, so the fallback '{agent}' was used — set a \
+             task agent or a folder default)"
+        )
+    } else {
+        error
+    }
+}
+
 /// Layered agent config: task override wins wholesale; else the folder's task
-/// settings; else the folder's default agent with no extra options.
+/// settings; else the folder's default agent with no extra options. `None`
+/// when none of them names an agent; the launch then uses [`FALLBACK_AGENT`].
 fn effective_agent_config(
     cfg: &WorkTaskConfig,
     settings: &WorkTaskFolderSettings,
@@ -15991,15 +16019,20 @@ mod tests {
     /// that silently never started.
     #[tokio::test]
     async fn a_merge_whose_launch_never_goes_live_still_reports_and_settles() {
+        use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+
         let f = delivery_fixture(FakeForge::default()).await;
-        // Neither the task nor its folder names an agent, so the launch fails
+        // The task names an agent that does not exist, so the launch fails
         // where every launch checks first — before any connection exists.
+        let mut task = row(&f.engine, f.task_id).await.into_active_model();
+        task.config = Set(serde_json::json!({ "agent_type": "no-such-agent" }).to_string());
+        task.update(&f.engine.db.conn).await.expect("update");
         let err = f
             .engine
             .merge_task(f.task_id, None, false, None, false)
             .await
             .expect_err("a launch that cannot start must not read as dispatched");
-        assert!(err.contains("no agent configured"), "{err}");
+        assert!(err.contains("unknown agent type"), "{err}");
 
         let task = row(&f.engine, f.task_id).await;
         assert_eq!(task.status, WorkTaskStatus::Review, "settled before we returned");
@@ -16015,6 +16048,50 @@ mod tests {
             f.engine.merging.lock().await.is_empty(),
             "the generation must own nothing once its failure is reported"
         );
+    }
+
+    /// The agent a launch uses when nothing names one: the task, the folder's
+    /// task settings and the folder's own default all empty.
+    #[tokio::test]
+    async fn an_unconfigured_task_launches_with_the_fallback_agent() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let folder_id = crate::db::test_helpers::seed_folder(&db, "/tmp/wt-fallback-agent").await;
+        let bare = get_folder_core(&db, folder_id).await.expect("folder");
+        let cfg = WorkTaskConfig::default();
+        let none = WorkTaskFolderSettings::default();
+
+        // Nothing configured anywhere: no agent comes back, and the launch
+        // substitutes the fallback rather than refusing.
+        let (agent, ..) = effective_agent_config(&cfg, &none, &bare);
+        assert_eq!(agent, None);
+        assert_eq!(FALLBACK_AGENT, "cursor");
+        assert!(
+            parse_agent_type(FALLBACK_AGENT).is_ok(),
+            "the fallback must be a real agent"
+        );
+
+        // Any configured layer wins over it.
+        let with_settings = WorkTaskFolderSettings {
+            default_agent_type: Some("codex".to_string()),
+            ..Default::default()
+        };
+        let (agent, ..) = effective_agent_config(&cfg, &with_settings, &bare);
+        assert_eq!(agent.as_deref(), Some("codex"));
+        let mut with_default = bare.clone();
+        with_default.default_agent_type = Some(crate::models::AgentType::ClaudeCode);
+        let (agent, ..) = effective_agent_config(&cfg, &none, &with_default);
+        assert_eq!(agent.as_deref(), Some("claude_code"));
+    }
+
+    /// A failure to start the fallback agent says the agent was a fallback.
+    #[test]
+    fn a_fallback_agent_failure_says_it_was_a_fallback() {
+        let plain = with_fallback_agent_note("spawn failed".to_string(), false, "claude_code");
+        assert_eq!(plain, "spawn failed");
+        let noted = with_fallback_agent_note("spawn failed".to_string(), true, "cursor");
+        assert!(noted.starts_with("spawn failed"), "{noted}");
+        assert!(noted.contains("fallback 'cursor'"), "{noted}");
+        assert!(noted.contains("set a task agent or a folder default"), "{noted}");
     }
 
     /// Fire-once, from either side. The launch reports itself live; the task

@@ -321,7 +321,7 @@ describe("TaskEditorDialog agent", () => {
   it("nothing to inherit: saves the agent the selector substituted and shows", async () => {
     // #864: no task settings, no folder default, and the placeholder agent is
     // disabled — so the selector highlights the first usable one on its own.
-    registry(agent("claude_code", { enabled: false }), agent("codex"))
+    registry(agent("cursor", { enabled: false }), agent("codex"))
     const user = userEvent.setup()
     const onSubmit = renderEditor()
     await shownAgent("Codex")
@@ -330,8 +330,8 @@ describe("TaskEditorDialog agent", () => {
     expect(screen.queryByText(INHERITED_HINT)).not.toBeInTheDocument()
 
     const config = await saveBrief(user, onSubmit)
-    // An agent-less task here has nothing to inherit, so the launch would
-    // fail with "no agent configured": what the row shows must be saved.
+    // An agent-less task here would launch the fallback, a disabled agent:
+    // what the row shows must be saved.
     expect(config.agent_type).toBe("codex")
     expect(config.label_snapshot?.agent_label).toBe("Codex")
   })
@@ -340,19 +340,19 @@ describe("TaskEditorDialog agent", () => {
     // A fresh install: nothing is configured anywhere, yet the pill highlights
     // an agent (the editor's own placeholder) — the same trap without any agent
     // being disabled.
-    registry(agent("claude_code"), agent("codex"))
+    registry(agent("cursor"), agent("codex"))
     const user = userEvent.setup()
     const onSubmit = renderEditor()
-    await shownAgent("Claude Code")
+    await shownAgent("Cursor")
     expect(await screen.findByText(NO_DEFAULT_HINT)).toBeInTheDocument()
 
     const config = await saveBrief(user, onSubmit)
-    expect(config.agent_type).toBe("claude_code")
+    expect(config.agent_type).toBe("cursor")
   })
 
   it("editing a task that was saved without an agent gives it the one shown", async () => {
     // How a task this bug already broke gets repaired: open it, save it.
-    registry(agent("claude_code", { enabled: false }), agent("codex"))
+    registry(agent("cursor", { enabled: false }), agent("codex"))
     const user = userEvent.setup()
     const onSubmit = renderEditor(agentlessFailedTask())
     await shownAgent("Codex")

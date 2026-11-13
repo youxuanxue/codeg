@@ -125,8 +125,9 @@ async fn annotate_worktree_missing(
 /// in front: a task that already ran is named by the agent that actually ran
 /// it, then by its own override, then by the folder's task settings (its own
 /// row wholesale, else the global one — `settings_get_effective`'s rule), then
-/// by the folder's default agent. All four empty leaves `None`, which is
-/// exactly the state the engine refuses to launch.
+/// by the folder's default agent, then by the engine's fallback agent. The
+/// last layer is what keeps a task nobody configured from drawing as agentless
+/// while the engine runs it.
 async fn annotate_agent_type(db: &AppDatabase, infos: &mut [WorkTaskInfo]) -> Result<(), DbError> {
     use crate::db::entities::{conversation, folder, work_task_settings};
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -203,7 +204,8 @@ async fn annotate_agent_type(db: &AppDatabase, infos: &mut [WorkTaskInfo]) -> Re
         info.agent_type = from_conversation
             .or(own_override)
             .or(from_settings)
-            .or_else(|| folder_defaults.get(&info.folder_id).cloned());
+            .or_else(|| folder_defaults.get(&info.folder_id).cloned())
+            .or_else(|| Some(crate::work_task::FALLBACK_AGENT.to_string()));
     }
     Ok(())
 }
@@ -1309,17 +1311,19 @@ mod tests {
         assert!(stamped.iter().all(|a| a.is_some()), "{stamped:?}");
     }
 
-    /// A folder with no default and no settings anywhere leaves the field
-    /// empty rather than guessing — the same state the engine refuses to
-    /// launch, which both views draw as a placeholder.
+    /// A folder with no default and no settings anywhere reads as the engine's
+    /// fallback agent, because that is the agent the engine launches it with.
     #[tokio::test]
-    async fn agent_type_is_none_when_nothing_is_configured() {
+    async fn agent_type_is_the_fallback_when_nothing_is_configured() {
         let db = fresh_in_memory_db().await;
         let folder_id = seed_folder(&db, "/tmp/wt-agent-none").await;
         let task = work_task_service::create(&db.conn, draft(folder_id, "a", None))
             .await
             .unwrap();
-        assert_eq!(agent_of(&db, task.id).await, None);
+        assert_eq!(
+            agent_of(&db, task.id).await.as_deref(),
+            Some(crate::work_task::FALLBACK_AGENT)
+        );
 
         // The global settings row is what a folder without its own follows.
         let settings = WorkTaskFolderSettings {

@@ -485,9 +485,6 @@ fn path_is_reparse_point(_path: &Path) -> bool {
 /// filesystem is case-insensitive but `Path` comparison is not — canonical
 /// forms can still differ in drive-letter case or user-supplied casing.
 fn paths_equivalent(a: &Path, b: &Path) -> bool {
-    // The Windows fallback has to live in its own cfg block. A shared
-    // `if a == b { return true }` followed by `#[cfg(not(windows))] false`
-    // is `needless_bool` on Linux once clippy 1.100 strips the Windows arm.
     #[cfg(windows)]
     {
         if a == b {
