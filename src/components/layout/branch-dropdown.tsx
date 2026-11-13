@@ -64,7 +64,7 @@ import { useScrollbarSafeDismiss } from "@/hooks/use-scrollbar-safe-dismiss"
 import { useGitQuickActions } from "@/hooks/use-git-quick-actions"
 import { useImeGuard } from "@/hooks/use-ime-guard"
 import type { FolderDetail, GitBranchList } from "@/lib/types"
-import { fsBaseName, siblingFsPath } from "@/lib/path-utils"
+import { suggestedSessionWorktree } from "@/lib/session-worktree"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { useTabActions } from "@/contexts/tab-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
@@ -379,22 +379,9 @@ export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
   }
 
   function handleOpenWorktreeDialog() {
-    const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-    let random = ""
-    for (let i = 0; i < 6; i++) {
-      random += chars[Math.floor(Math.random() * chars.length)]
-    }
-    // `folderPath` is a native OS path. Splitting it on "/" alone left every
-    // Windows repo with no name and no parent — `lastIndexOf("/")` returns -1
-    // there, so the prefilled worktree path came out as the bare relative
-    // "/C:\work\repo-main-abc123" instead of a sibling directory.
-    const folderName = fsBaseName(folderPath) || "project"
-    const currentBranch = branch ?? "main"
-    const defaultBranch = `cv-${currentBranch}-${random}`
-    setWorktreeBranchName(defaultBranch)
-    setWorktreePath(
-      siblingFsPath(folderPath, `${folderName}-${currentBranch}-${random}`)
-    )
+    const suggested = suggestedSessionWorktree(folderPath)
+    setWorktreeBranchName(suggested.branchName)
+    setWorktreePath(suggested.worktreePath)
     setWorktreeOpen(true)
   }
 
