@@ -31,8 +31,10 @@ import {
 } from "@/components/ui/popover"
 import { BranchPicker } from "@/components/shared/branch-picker"
 import { FolderSelect } from "@/components/shared/folder-select"
+import { useAcpAgents } from "@/hooks/use-acp-agents"
 import { useScrollbarSafeDismiss } from "@/hooks/use-scrollbar-safe-dismiss"
 import {
+  workTaskFallbackAgent,
   workTaskSettingsEffective,
   workTaskTemplateDelete,
   workTaskTemplateList,
@@ -46,11 +48,6 @@ import type {
   WorkTaskDraft,
   WorkTaskTemplate,
 } from "@/lib/types"
-
-/** The agent the engine launches a task with when nothing names one
- *  (`FALLBACK_AGENT` in `work_task/engine.rs`). Shown as the placeholder when
- *  there is nothing to inherit, so the pill says what would actually run. */
-const FALLBACK_AGENT: AgentType = "cursor"
 
 interface TaskEditorDialogProps {
   open: boolean
@@ -142,8 +139,16 @@ function TaskEditorBody({
   // While clean, the controls display the folder's effective task settings and
   // the draft keeps inheriting (agent_type null) — nothing is frozen.
   const [agentDirty, setAgentDirty] = useState(task?.config?.agent_type != null)
+  // The pill's first paint only: the task's own agent, else the first enabled
+  // one. While clean, the effect below replaces it with what the folder
+  // inherits or, with nothing to inherit, the backend's fallback; a dirty pill
+  // is the user's own pick. An untouched pill is saved as "inherit"
+  // (`agent_type: null`), so this value is never written into a task.
+  const { agents: acpAgents } = useAcpAgents()
   const [agentType, setAgentType] = useState<AgentType>(
-    task?.config?.agent_type ?? FALLBACK_AGENT
+    task?.config?.agent_type ??
+      acpAgents.find((a) => a.available)?.agent_type ??
+      ""
   )
   // What an agent-less task launches with in this folder, resolved the way the
   // engine does it: the effective task settings' agent, else the folder's
@@ -209,15 +214,22 @@ function TaskEditorBody({
   useEffect(() => {
     if (agentDirty || folderId == null) return
     let cancelled = false
-    workTaskSettingsEffective(folderId)
-      .then((s) => {
+    Promise.all([
+      workTaskSettingsEffective(folderId),
+      // Only read when nothing is inherited; failing to read it must not stop
+      // the inherited settings from loading.
+      workTaskFallbackAgent().catch(() => null),
+    ])
+      .then(([s, fallback]) => {
         if (cancelled) return
         const agent = s.default_agent_type ?? folderDefaultAgent ?? null
         setInherited({ folderId, agent })
-        // Nothing to inherit: the engine's own fallback, shown as a
+        // Nothing to inherit: the backend's own fallback, shown as a
         // placeholder that a save keeps rather than inherits (see
-        // `pinsShownAgent`).
-        setAgentType(agent ?? FALLBACK_AGENT)
+        // `pinsShownAgent`). Read from the backend, never spelled here.
+        // With neither an inherited agent nor the fallback, keep what the pill
+        // already shows rather than blanking it.
+        setAgentType((current) => agent ?? fallback ?? current)
         setModeId(s.mode_id ?? null)
         setConfigValues(s.config_values ?? {})
       })
@@ -240,10 +252,12 @@ function TaskEditorBody({
   // quietly ignored.
   const choosesBranch = task?.source_kind !== "forge_pr"
 
+  // No probe while the pill has no agent yet: an empty first paint must not
+  // spawn a CLI for nothing.
   const agentOptions = useAgentOptions(
     agentType,
     folderPath,
-    true,
+    agentType !== "",
     configValues
   )
   const booleanLabels = useBooleanOptionLabels()

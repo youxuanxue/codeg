@@ -30,6 +30,7 @@ import { useAgentOptions } from "@/components/automations/use-agent-options"
 import { getAgentLabel } from "@/lib/custom-agents"
 import {
   listFolderCommands,
+  workTaskFallbackAgent,
   workTaskSettingsDelete,
   workTaskSettingsGet,
   workTaskSettingsGetOwn,
@@ -213,7 +214,9 @@ function TaskSettingsBody({
   // its own settings row. Seeded from what actually exists in the DB, so the
   // dialog shows the true source instead of guessing.
   const [source, setSource] = useState<"global" | "custom">("custom")
-  const [agentType, setAgentType] = useState<AgentType>("claude_code")
+  // Empty until the load below answers; then the saved agent, the folder's
+  // default, or the backend's own fallback. Never a name spelled here.
+  const [agentType, setAgentType] = useState<AgentType>("")
   const [modeId, setModeId] = useState<string | null>(null)
   const [configValues, setConfigValues] = useState<Record<string, string>>({})
   const [autoProcess, setAutoProcess] = useState(false)
@@ -250,14 +253,17 @@ function TaskSettingsBody({
       isGlobal
         ? Promise.resolve([])
         : listFolderCommands(folderId).catch(() => []),
+      // Only read when nothing names an agent; failing to read it must not
+      // take the rest of the form down with it.
+      workTaskFallbackAgent().catch(() => null),
     ])
-      .then(([own, global, commands]) => {
+      .then(([own, global, commands, fallback]) => {
         if (cancelled) return
         const s = isGlobal ? global : (own ?? global)
         setLoaded(s)
         setSource(isGlobal || own != null ? "custom" : "global")
         setAgentType(
-          s.default_agent_type ?? folder?.default_agent_type ?? "claude_code"
+          s.default_agent_type ?? folder?.default_agent_type ?? fallback ?? ""
         )
         setModeId(s.mode_id ?? null)
         setConfigValues(s.config_values ?? {})

@@ -17,6 +17,7 @@ vi.mock("@/lib/api", () => ({
   workTaskSettingsSet: (...args: unknown[]) => setMock(...args),
   workTaskSettingsDelete: (...args: unknown[]) => deleteMock(...args),
   listFolderCommands: (...args: unknown[]) => commandsMock(...args),
+  workTaskFallbackAgent: () => Promise.resolve("cursor"),
 }))
 
 // The agent surface probes a live CLI; none of it is under test here.

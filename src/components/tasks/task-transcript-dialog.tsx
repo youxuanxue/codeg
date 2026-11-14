@@ -41,7 +41,11 @@ import {
 } from "@/components/ui/drawer"
 import { useAcpActions } from "@/contexts/acp-connections-context"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
-import { getFolderConversation, workTaskEvents } from "@/lib/api"
+import {
+  getFolderConversation,
+  workTaskEvents,
+  workTaskFallbackAgent,
+} from "@/lib/api"
 import { FOLLOW_UP_SCENARIOS } from "@/lib/task-follow-up"
 import {
   extractRounds,
@@ -122,14 +126,20 @@ function TaskAgentResolver({ task }: { task: WorkTask }) {
   useEffect(() => {
     if (override != null) return
     let cancelled = false
+    // The backend names the last-resort agent; this view never spells one. A
+    // failed read is `null`, so it neither rejects unhandled nor blocks the
+    // transcript when a nearer layer already names the agent.
+    const fallback = workTaskFallbackAgent().catch(() => null)
     getFolderConversation(conversationId)
-      .then((detail) => {
-        if (cancelled) return
-        setResolved(detail.summary.agent_type ?? folderDefault ?? "claude_code")
+      .then(async (detail) => {
+        const agent =
+          detail.summary.agent_type ?? folderDefault ?? (await fallback)
+        if (!cancelled && agent != null) setResolved(agent)
       })
-      .catch(() => {
+      .catch(async () => {
         // Transcript unreadable (agent gone, file pruned) — best-effort.
-        if (!cancelled) setResolved(folderDefault ?? "claude_code")
+        const agent = folderDefault ?? (await fallback)
+        if (!cancelled && agent != null) setResolved(agent)
       })
     return () => {
       cancelled = true

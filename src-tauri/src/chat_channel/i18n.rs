@@ -1079,21 +1079,6 @@ pub fn task_usage(lang: Lang, prefix: &str) -> String {
     }
 }
 
-pub fn no_agent_selected(lang: Lang, prefix: &str) -> String {
-    match lang {
-        Lang::ZhCn => format!("未选择 Agent，请先使用 {prefix}agent 选择，或在工作目录上设置默认 Agent。"),
-        Lang::ZhTw => format!("未選擇 Agent，請先使用 {prefix}agent 選擇，或在工作目錄上設定預設 Agent。"),
-        Lang::Ja => format!("エージェントが選択されていません。{prefix}agent で選択するか、フォルダにデフォルトエージェントを設定してください。"),
-        Lang::Ko => format!("에이전트가 선택되지 않았습니다. {prefix}agent로 선택하거나 폴더에 기본 에이전트를 설정하세요."),
-        Lang::Es => format!("Ningún agente seleccionado. Usa {prefix}agent para elegir uno o define uno por defecto en la carpeta."),
-        Lang::De => format!("Kein Agent ausgewählt. {prefix}agent verwenden oder Standard im Ordner festlegen."),
-        Lang::Fr => format!("Aucun agent sélectionné. Utilisez {prefix}agent ou définissez un agent par défaut sur le dossier."),
-        Lang::Pt => format!("Nenhum agente selecionado. Use {prefix}agent para escolher ou defina um padrão na pasta."),
-        Lang::Ar => format!("لم يتم اختيار وكيل. استخدم {prefix}agent لاختيار واحد أو حدد وكيلًا افتراضيًا للمجلد."),
-        Lang::En => format!("No agent selected. Use {prefix}agent to pick one or set a default on the folder."),
-    }
-}
-
 pub fn failed_to_start_agent_label(lang: Lang) -> &'static str {
     match lang {
         Lang::ZhCn => "启动 Agent 失败: ",

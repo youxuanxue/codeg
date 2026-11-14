@@ -1223,7 +1223,7 @@ impl TaskEngine {
             .map_err(|e| e.to_string())?;
 
         // Effective agent + config: task override > folder task settings >
-        // folder default agent > `FALLBACK_AGENT`. Audited via a
+        // folder default agent > `AgentType::FALLBACK`. Audited via a
         // config_effective event (values are inherited live, never frozen).
         let cfg: WorkTaskConfig =
             serde_json::from_str(&task.config).unwrap_or_default();
@@ -1236,7 +1236,8 @@ impl TaskEngine {
         // a folder nobody configured still runs. Remembered, because a failure
         // to start must say the agent was a guess rather than a setting.
         let used_fallback_agent = configured_agent.is_none();
-        let agent_str = configured_agent.unwrap_or_else(|| FALLBACK_AGENT.to_string());
+        let agent_str = configured_agent
+            .unwrap_or_else(|| AgentType::FALLBACK.as_wire().into_owned());
         let agent_type = parse_agent_type(&agent_str)?;
 
         // Cheap validation before any side effects; the full prompt is composed
@@ -7318,10 +7319,6 @@ fn chosen_base_branch(task: &crate::db::entities::work_task::Model) -> Option<St
         .filter(|b| !b.is_empty())
 }
 
-/// The agent a task runs with when neither the task, the folder's task
-/// settings nor the folder names one.
-pub(crate) const FALLBACK_AGENT: &str = "cursor";
-
 /// Say that the agent was the fallback when it fails to start, so the error
 /// does not read as a choice the user made.
 fn with_fallback_agent_note(error: String, used_fallback: bool, agent: &str) -> String {
@@ -7337,7 +7334,7 @@ fn with_fallback_agent_note(error: String, used_fallback: bool, agent: &str) -> 
 
 /// Layered agent config: task override wins wholesale; else the folder's task
 /// settings; else the folder's default agent with no extra options. `None`
-/// when none of them names an agent; the launch then uses [`FALLBACK_AGENT`].
+/// when none of them names an agent; the launch then uses `AgentType::FALLBACK`.
 fn effective_agent_config(
     cfg: &WorkTaskConfig,
     settings: &WorkTaskFolderSettings,
@@ -16064,9 +16061,9 @@ mod tests {
         // substitutes the fallback rather than refusing.
         let (agent, ..) = effective_agent_config(&cfg, &none, &bare);
         assert_eq!(agent, None);
-        assert_eq!(FALLBACK_AGENT, "cursor");
+        assert_eq!(AgentType::FALLBACK, AgentType::Cursor);
         assert!(
-            parse_agent_type(FALLBACK_AGENT).is_ok(),
+            parse_agent_type(&AgentType::FALLBACK.as_wire()).is_ok(),
             "the fallback must be a real agent"
         );
 

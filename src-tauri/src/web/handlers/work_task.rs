@@ -484,6 +484,10 @@ pub async fn work_task_settings_get(
     Ok(Json(result))
 }
 
+pub async fn work_task_fallback_agent() -> Json<String> {
+    Json(core::work_task_fallback_agent_core())
+}
+
 pub async fn work_task_settings_effective(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<FolderParams>,

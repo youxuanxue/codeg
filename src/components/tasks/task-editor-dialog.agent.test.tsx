@@ -19,6 +19,10 @@ const inheritance = vi.hoisted(() => ({
   settingsModeId: null as string | null,
   settingsConfig: {} as Record<string, string>,
   folderDefault: null as string | null,
+  // What the backend says it launches an agent-less task with.
+  fallback: "cursor" as string,
+  // Make the fallback read fail, as a backend that predates the command would.
+  fallbackFails: false,
 }))
 const templateSave = vi.hoisted(() => vi.fn())
 // The config selections each probe host passed on its latest render: the
@@ -37,6 +41,11 @@ vi.mock("@/lib/api", () => ({
       main_worktree_branch: null,
     }),
   getGitBranch: () => Promise.resolve("main"),
+  // The backend owns the fallback; the test only plays its answer.
+  workTaskFallbackAgent: () =>
+    inheritance.fallbackFails
+      ? Promise.reject(new Error("no such command"))
+      : Promise.resolve(inheritance.fallback),
   workTaskSettingsEffective: () =>
     Promise.resolve({
       default_agent_type: inheritance.settingsAgent,
@@ -293,6 +302,8 @@ beforeEach(() => {
   inheritance.settingsAgent = null
   inheritance.settingsModeId = null
   inheritance.settingsConfig = {}
+  inheritance.fallback = "cursor"
+  inheritance.fallbackFails = false
   inheritance.folderDefault = null
   templateSave.mockReset().mockResolvedValue(undefined)
   probeSelections.bar = []
@@ -348,6 +359,47 @@ describe("TaskEditorDialog agent", () => {
 
     const config = await saveBrief(user, onSubmit)
     expect(config.agent_type).toBe("cursor")
+  })
+
+  it("nothing to inherit: shows whatever agent the backend names as its fallback", async () => {
+    // The editor spells no agent of its own. Naming a different fallback here
+    // proves the pill follows the backend's answer, not a name kept in the UI.
+    inheritance.fallback = "codex"
+    registry(agent("cursor"), agent("codex"))
+    const user = userEvent.setup()
+    const onSubmit = renderEditor()
+    await shownAgent("Codex")
+    expect(await screen.findByText(NO_DEFAULT_HINT)).toBeInTheDocument()
+
+    const config = await saveBrief(user, onSubmit)
+    expect(config.agent_type).toBe("codex")
+  })
+
+  it("a failed fallback read does not stop the inherited agent from loading", async () => {
+    inheritance.fallbackFails = true
+    inheritance.settingsAgent = "codex"
+    registry(agent("cursor"), agent("codex"))
+    const user = userEvent.setup()
+    const onSubmit = renderEditor()
+    await shownAgent("Codex")
+    expect(await screen.findByText(INHERITED_HINT)).toBeInTheDocument()
+
+    const config = await saveBrief(user, onSubmit)
+    expect(config.agent_type).toBeNull()
+  })
+
+  it("an untouched pill with an inherited agent saves as inherit, never the first-paint placeholder", async () => {
+    // Before the settings answer, the pill holds a placeholder (the first
+    // available agent). It must not leak into the saved task.
+    inheritance.settingsAgent = "codex"
+    registry(agent("cursor"), agent("codex"))
+    const user = userEvent.setup()
+    const onSubmit = renderEditor()
+    await shownAgent("Codex")
+    expect(await screen.findByText(INHERITED_HINT)).toBeInTheDocument()
+
+    const config = await saveBrief(user, onSubmit)
+    expect(config.agent_type).toBeNull()
   })
 
   it("editing a task that was saved without an agent gives it the one shown", async () => {
