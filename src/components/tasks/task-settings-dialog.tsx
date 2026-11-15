@@ -531,7 +531,12 @@ function TaskSettingsBody({
                           setConfigValues({})
                           commit()
                         }}
-                        onFallback={setAgentType}
+                        onFallback={(a) => {
+                          setAgentType(a)
+                          setModeId(null)
+                          setConfigValues({})
+                          commit()
+                        }}
                       />
                     </div>
                     <AgentConfigSection
