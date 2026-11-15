@@ -23,6 +23,8 @@ import { getActiveRemoteConnectionId } from "@/lib/transport"
 interface DirectoryPathInputProps {
   value: string
   onValueChange: (path: string) => void
+  /** Called once a value is final: the box lost focus, or a picker filled it. */
+  onCommit?: () => void
   id?: string
   placeholder?: string
   disabled?: boolean
@@ -47,6 +49,7 @@ interface DirectoryPathInputProps {
 export function DirectoryPathInput({
   value,
   onValueChange,
+  onCommit,
   id,
   placeholder,
   disabled,
@@ -69,8 +72,11 @@ export function DirectoryPathInput({
     const selected = await openFileDialog({ directory: true, multiple: false })
     if (!selected) return
     const path = Array.isArray(selected) ? selected[0] : selected
-    if (path) onValueChange(path)
-  }, [nativePicker, onValueChange])
+    if (path) {
+      onValueChange(path)
+      onCommit?.()
+    }
+  }, [nativePicker, onValueChange, onCommit])
 
   return (
     <>
@@ -82,6 +88,7 @@ export function DirectoryPathInput({
             id={id}
             value={value}
             onChange={(e) => onValueChange(e.target.value)}
+            onBlur={onCommit}
             placeholder={placeholder}
             disabled={disabled}
           />
@@ -112,7 +119,10 @@ export function DirectoryPathInput({
       <DirectoryBrowserDialog
         open={browserOpen}
         onOpenChange={setBrowserOpen}
-        onSelect={onValueChange}
+        onSelect={(path) => {
+          onValueChange(path)
+          onCommit?.()
+        }}
         title={browserTitle}
         initialPath={initialPath}
       />

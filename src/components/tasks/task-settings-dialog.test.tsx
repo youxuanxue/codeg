@@ -92,11 +92,9 @@ function renderDialog(folderId: number | null) {
   )
 }
 
-/** Wait for the initial load — Save is disabled until the settings land. */
-async function saveButton() {
-  const save = await screen.findByRole("button", { name: "Save" })
-  await waitFor(() => expect(save).toBeEnabled())
-  return save
+/** Wait for the initial load: the tabs only render once the settings land. */
+async function loadSettings() {
+  await screen.findByRole("tablist", { name: "Task settings" })
 }
 
 /**
@@ -141,7 +139,7 @@ describe("TaskSettingsDialog stage prompts", () => {
   it("saves the text typed for one stage under that stage's key", async () => {
     const user = userEvent.setup()
     renderDialog(1)
-    const save = await saveButton()
+    await loadSettings()
 
     await openPromptsTab(user)
     await openStage(user, "Merge")
@@ -149,7 +147,7 @@ describe("TaskSettingsDialog stage prompts", () => {
       screen.getByRole("textbox", { name: "Merge" }),
       "Write the commit message in Chinese."
     )
-    await user.click(save)
+    await user.tab()
 
     await waitFor(() => expect(setMock).toHaveBeenCalled())
     const [, saved] = setMock.mock.calls[0] as [number, WorkTaskFolderSettings]
@@ -166,7 +164,7 @@ describe("TaskSettingsDialog stage prompts", () => {
     )
     const user = userEvent.setup()
     renderDialog(1)
-    await saveButton()
+    await loadSettings()
     await openPromptsTab(user)
 
     // "All stages" is selected first, so its text is the one on screen.
@@ -186,7 +184,7 @@ describe("TaskSettingsDialog stage prompts", () => {
   it("gives each stage its own example placeholder", async () => {
     const user = userEvent.setup()
     renderDialog(1)
-    await saveButton()
+    await loadSettings()
     await openPromptsTab(user)
 
     const placeholders: string[] = []
@@ -209,11 +207,11 @@ describe("TaskSettingsDialog stage prompts", () => {
   it("drops stages whose text is only whitespace", async () => {
     const user = userEvent.setup()
     renderDialog(1)
-    const save = await saveButton()
+    await loadSettings()
 
     await openPromptsTab(user)
     await user.type(screen.getByRole("textbox", { name: "All stages" }), "   ")
-    await user.click(save)
+    await user.tab()
 
     await waitFor(() => expect(setMock).toHaveBeenCalled())
     const [, saved] = setMock.mock.calls[0] as [number, WorkTaskFolderSettings]
@@ -225,7 +223,7 @@ describe("TaskSettingsDialog merge tab", () => {
   it("keeps the landing options together, apart from the worktree ones", async () => {
     const user = userEvent.setup()
     renderDialog(1)
-    await saveButton()
+    await loadSettings()
 
     await openTab(user, "Merge")
     expect(
@@ -260,13 +258,13 @@ describe("TaskSettingsDialog merge tab", () => {
   it("saves the auto-merge switch alongside the other landing options", async () => {
     const user = userEvent.setup()
     renderDialog(1)
-    const save = await saveButton()
+    await loadSettings()
 
     await openTab(user, "Merge")
     const toggle = screen.getByRole("switch", { name: "Merge automatically" })
     expect(toggle).toHaveAttribute("data-state", "unchecked")
     await user.click(toggle)
-    await user.click(save)
+    await user.tab()
 
     await waitFor(() => expect(setMock).toHaveBeenCalled())
     const [, saved] = setMock.mock.calls[0] as [number, WorkTaskFolderSettings]
@@ -278,7 +276,7 @@ describe("TaskSettingsDialog merge tab", () => {
     getOwnMock.mockResolvedValue(settings({ auto_merge: true }))
     const user = userEvent.setup()
     renderDialog(1)
-    await saveButton()
+    await loadSettings()
 
     await openTab(user, "Merge")
     expect(
@@ -304,7 +302,7 @@ describe("TaskSettingsDialog worktree tab", () => {
     ])
     const user = userEvent.setup()
     renderDialog(1)
-    await saveButton()
+    await loadSettings()
     await openTab(user, "Worktree")
     expect(
       screen.getByRole("textbox", { name: "Preflight command" })
@@ -328,7 +326,7 @@ describe("TaskSettingsDialog worktree tab", () => {
     ])
     const user = userEvent.setup()
     renderDialog(1)
-    await saveButton()
+    await loadSettings()
     await openTab(user, "Worktree")
     expect(
       screen.getByRole("textbox", { name: "Preflight command" })
@@ -338,13 +336,13 @@ describe("TaskSettingsDialog worktree tab", () => {
   it("saves a chosen worktree directory, and blanks it back to the default", async () => {
     const user = userEvent.setup()
     renderDialog(1)
-    const save = await saveButton()
+    await loadSettings()
 
     await openTab(user, "Worktree")
     const box = screen.getByRole("textbox", { name: "Worktree location" })
     expect(box).toHaveValue("")
     await user.type(box, "  ~/codeg-worktrees  ")
-    await user.click(save)
+    await user.tab()
 
     await waitFor(() => expect(setMock).toHaveBeenCalled())
     const [, saved] = setMock.mock.calls[0] as [number, WorkTaskFolderSettings]
@@ -355,7 +353,7 @@ describe("TaskSettingsDialog worktree tab", () => {
     // which the engine reads off an absent value — not an empty one.
     setMock.mockClear()
     await user.clear(box)
-    await user.click(save)
+    await user.tab()
     await waitFor(() => expect(setMock).toHaveBeenCalled())
     const [, cleared] = setMock.mock.calls[0] as [
       number,
@@ -368,7 +366,7 @@ describe("TaskSettingsDialog worktree tab", () => {
     getOwnMock.mockResolvedValue(settings({ worktree_root: "/var/trees" }))
     const user = userEvent.setup()
     renderDialog(1)
-    await saveButton()
+    await loadSettings()
 
     await openTab(user, "Worktree")
     expect(
@@ -381,7 +379,7 @@ describe("TaskSettingsDialog auto-compact", () => {
   it("saves the threshold and the command, and seeds both back", async () => {
     const user = userEvent.setup()
     renderDialog(1)
-    const save = await saveButton()
+    await loadSettings()
 
     const box = screen.getByRole("textbox", { name: "Auto-compact threshold" })
     expect(box).toHaveValue("0")
@@ -391,13 +389,21 @@ describe("TaskSettingsDialog auto-compact", () => {
       screen.getByRole("textbox", { name: "Compact command" }),
       "  /compress  "
     )
-    await user.click(save)
+    await user.tab()
 
-    await waitFor(() => expect(setMock).toHaveBeenCalled())
-    const [, saved] = setMock.mock.calls[0] as [number, WorkTaskFolderSettings]
+    // Leaving the threshold box already saved once; the last write is the
+    // one that carries both values.
+    await waitFor(() => {
+      const last = setMock.mock.calls[setMock.mock.calls.length - 1] as
+        | [number, WorkTaskFolderSettings]
+        | undefined
+      expect(last?.[1].compact_command).toBe("/compress")
+    })
+    const [, saved] = setMock.mock.calls[setMock.mock.calls.length - 1] as [
+      number,
+      WorkTaskFolderSettings,
+    ]
     expect(saved.auto_compact_percent).toBe(80)
-    // Trimmed: the value is sent to the agent as a prompt, verbatim.
-    expect(saved.compact_command).toBe("/compress")
   })
 
   it("seeds the threshold and the command from the stored row", async () => {
@@ -405,7 +411,7 @@ describe("TaskSettingsDialog auto-compact", () => {
       settings({ auto_compact_percent: 80, compact_command: "/compress" })
     )
     renderDialog(1)
-    await saveButton()
+    await loadSettings()
 
     expect(
       screen.getByRole("textbox", { name: "Auto-compact threshold" })
@@ -418,14 +424,14 @@ describe("TaskSettingsDialog auto-compact", () => {
   it("reads a percentage it cannot honour as off", async () => {
     const user = userEvent.setup()
     renderDialog(1)
-    const save = await saveButton()
+    await loadSettings()
 
     const box = screen.getByRole("textbox", { name: "Auto-compact threshold" })
     // Above 100 there is no occupancy that could ever reach it — storing it
     // would look enabled while behaving exactly like off.
     await user.clear(box)
     await user.type(box, "120")
-    await user.click(save)
+    await user.tab()
 
     await waitFor(() => expect(setMock).toHaveBeenCalled())
     const [, saved] = setMock.mock.calls[0] as [number, WorkTaskFolderSettings]
@@ -434,7 +440,7 @@ describe("TaskSettingsDialog auto-compact", () => {
     // And an emptied box is off too, rather than NaN.
     setMock.mockClear()
     await user.clear(box)
-    await user.click(save)
+    await user.tab()
     await waitFor(() => expect(setMock).toHaveBeenCalled())
     const [, blanked] = setMock.mock.calls[0] as [
       number,
@@ -453,7 +459,7 @@ describe("TaskSettingsDialog scope", () => {
     )
     const user = userEvent.setup()
     renderDialog(1)
-    const save = await saveButton()
+    await loadSettings()
 
     // Following the global row: the form stays hidden until it is detached.
     expect(screen.queryByRole("tab", { name: "Prompts" })).toBeNull()
@@ -463,7 +469,7 @@ describe("TaskSettingsDialog scope", () => {
       "From global."
     )
 
-    await user.click(save)
+    await user.tab()
     await waitFor(() => expect(setMock).toHaveBeenCalled())
     const [, saved] = setMock.mock.calls[0] as [number, WorkTaskFolderSettings]
     expect(saved.max_concurrent).toBe(5)
@@ -474,12 +480,79 @@ describe("TaskSettingsDialog scope", () => {
   it("drops the folder's own row when it is set back to the global defaults", async () => {
     const user = userEvent.setup()
     renderDialog(1)
-    const save = await saveButton()
+    await loadSettings()
 
     await user.click(screen.getByRole("tab", { name: "Global defaults" }))
-    await user.click(save)
+    await user.tab()
 
     await waitFor(() => expect(deleteMock).toHaveBeenCalledWith(1))
     expect(setMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("TaskSettingsDialog autosave", () => {
+  it("has no Save button: a click on a switch writes at once", async () => {
+    const user = userEvent.setup()
+    renderDialog(1)
+    await loadSettings()
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull()
+
+    await openTab(user, "Merge")
+    await user.click(
+      screen.getByRole("switch", { name: "Merge automatically" })
+    )
+
+    await waitFor(() => expect(setMock).toHaveBeenCalledTimes(1))
+    const [folder, saved] = setMock.mock.calls[0] as [
+      number,
+      WorkTaskFolderSettings,
+    ]
+    expect(folder).toBe(1)
+    expect(saved.auto_merge).toBe(true)
+  })
+
+  it("does not write while a text box is being typed in", async () => {
+    const user = userEvent.setup()
+    renderDialog(1)
+    await loadSettings()
+
+    await openTab(user, "Worktree")
+    await user.type(
+      screen.getByRole("textbox", { name: "Worktree location" }),
+      "~/wt"
+    )
+    expect(setMock).not.toHaveBeenCalled()
+    await user.tab()
+    await waitFor(() => expect(setMock).toHaveBeenCalledTimes(1))
+  })
+
+  it("does not write when a box loses focus with nothing changed", async () => {
+    const user = userEvent.setup()
+    renderDialog(1)
+    await loadSettings()
+
+    await openTab(user, "Worktree")
+    await user.click(screen.getByRole("textbox", { name: "Worktree location" }))
+    await user.tab()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(setMock).not.toHaveBeenCalled()
+  })
+
+  it("shows the stored value again when a write fails", async () => {
+    setMock.mockRejectedValueOnce(new Error("disk full"))
+    const user = userEvent.setup()
+    renderDialog(1)
+    await loadSettings()
+
+    await openTab(user, "Merge")
+    const toggle = screen.getByRole("switch", { name: "Merge automatically" })
+    await user.click(toggle)
+
+    await waitFor(() => expect(getOwnMock.mock.calls.length).toBeGreaterThan(1))
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "Merge automatically" })
+      ).toHaveAttribute("data-state", "unchecked")
+    )
   })
 })
