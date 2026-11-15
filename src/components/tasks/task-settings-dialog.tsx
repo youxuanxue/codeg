@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import {
@@ -44,12 +44,10 @@ import {
   SettingNote,
   SettingRow,
 } from "@/components/shared/setting-card"
-import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
@@ -156,12 +154,7 @@ export function TaskSettingsDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[34rem]">
-        {open ? (
-          <TaskSettingsScoped
-            initialFolderId={folderId}
-            onClose={() => onOpenChange(false)}
-          />
-        ) : null}
+        {open ? <TaskSettingsScoped initialFolderId={folderId} /> : null}
       </DialogContent>
     </Dialog>
   )
@@ -169,33 +162,24 @@ export function TaskSettingsDialog({
 
 function TaskSettingsScoped({
   initialFolderId,
-  onClose,
 }: {
   initialFolderId: number | null
-  onClose: () => void
 }) {
   // Mounted fresh per dialog open, so the scope re-seeds from the board's
   // selection every time; switching remounts the body wholesale (clean load).
   const [scope, setScope] = useState<number>(initialFolderId ?? GLOBAL_SCOPE)
   return (
-    <TaskSettingsBody
-      key={scope}
-      folderId={scope}
-      onScopeChange={setScope}
-      onClose={onClose}
-    />
+    <TaskSettingsBody key={scope} folderId={scope} onScopeChange={setScope} />
   )
 }
 
 function TaskSettingsBody({
   folderId,
   onScopeChange,
-  onClose,
 }: {
   /** `GLOBAL_SCOPE` (0) edits the global-defaults row. */
   folderId: number
   onScopeChange: (folderId: number) => void
-  onClose: () => void
 }) {
   const t = useTranslations("Tasks")
   const folders = useAppWorkspaceStore((s) => s.folders)
@@ -234,7 +218,16 @@ function TaskSettingsBody({
   const [stagePrompts, setStagePrompts] = useState<Record<string, string>>({})
   const [stage, setStage] = useState<string>(PROMPT_STAGES[0].key)
   const [tab, setTab] = useState("general")
-  const [saving, setSaving] = useState(false)
+  // Every change saves itself: a click on a switch or option writes at once,
+  // and a text box writes when it loses focus (not per keystroke, so a
+  // half-typed command is never stored). `saveTick` defers the write to the
+  // render after the state update, so it always sees the new values.
+  const [saveTick, setSaveTick] = useState(0)
+  const [reloadKey, setReloadKey] = useState(0)
+  const inFlightRef = useRef(false)
+  const pendingRef = useRef(false)
+  const lastSigRef = useRef<string | null>(null)
+  const commit = () => setSaveTick((n) => n + 1)
   const activeStage =
     PROMPT_STAGES.find((s) => s.key === stage) ?? PROMPT_STAGES[0]
 
@@ -293,7 +286,7 @@ function TaskSettingsBody({
     return () => {
       cancelled = true
     }
-  }, [folderId, folder?.default_agent_type, isGlobal])
+  }, [folderId, folder?.default_agent_type, isGlobal, reloadKey])
 
   // The form (and thus the config surface) is live for the global scope and
   // for a folder editing its own settings; while a folder follows the global
@@ -308,13 +301,41 @@ function TaskSettingsBody({
   )
   const booleanLabels = useBooleanOptionLabels()
 
+  // What the form holds, as one comparable value: a blur or a click that
+  // changed nothing must not write.
+  const signature = JSON.stringify([
+    source,
+    agentType,
+    modeId,
+    configValues,
+    autoProcess,
+    maxConcurrent,
+    mergeStrategy,
+    autoMerge,
+    deleteWorktreeDefault,
+    worktreeRoot,
+    initCommand,
+    autoCompactPercent,
+    compactCommand,
+    preflightCommand,
+    stagePrompts,
+  ])
+  const signatureRef = useRef(signature)
+
   const save = async () => {
-    setSaving(true)
+    if (loaded == null) return
+    // One write at a time; a change that lands meanwhile re-runs afterwards.
+    if (inFlightRef.current) {
+      pendingRef.current = true
+      return
+    }
+    if (signature === lastSigRef.current) return
+    inFlightRef.current = true
     try {
       // "Use global defaults" saves by dropping the folder's own row.
       if (!isGlobal && source === "global") {
         await workTaskSettingsDelete(folderId)
-        onClose()
+        lastSigRef.current = signature
         return
       }
       const snapshot = await agentOptions.ensure()
@@ -365,13 +386,39 @@ function TaskSettingsBody({
         ),
       }
       await workTaskSettingsSet(folderId, settings)
-      onClose()
+      lastSigRef.current = signature
     } catch (e) {
       toast.error(toErrorMessage(e))
+      // Show what is actually stored instead of a value that did not save.
+      setReloadKey((k) => k + 1)
     } finally {
-      setSaving(false)
+      inFlightRef.current = false
+      if (pendingRef.current) {
+        pendingRef.current = false
+        commit()
+      }
     }
   }
+
+  const saveRef = useRef(save)
+  useEffect(() => {
+    saveRef.current = save
+    signatureRef.current = signature
+  })
+  // The loaded values are the saved baseline.
+  useEffect(() => {
+    if (loaded != null) lastSigRef.current = signatureRef.current
+  }, [loaded])
+  useEffect(() => {
+    if (saveTick > 0) void saveRef.current()
+  }, [saveTick])
+  // Closing with a text box still focused may skip its blur; write then.
+  useEffect(
+    () => () => {
+      void saveRef.current()
+    },
+    []
+  )
 
   return (
     <>
@@ -426,9 +473,10 @@ function TaskSettingsBody({
                 </span>
                 <Tabs
                   value={source}
-                  onValueChange={(v) =>
+                  onValueChange={(v) => {
                     setSource(v === "global" ? "global" : "custom")
-                  }
+                    commit()
+                  }}
                 >
                   <TabsList className="group-data-horizontal/tabs:h-8">
                     <TabsTrigger value="global" className="px-2.5 text-xs">
@@ -481,8 +529,14 @@ function TaskSettingsBody({
                           setAgentType(a)
                           setModeId(null)
                           setConfigValues({})
+                          commit()
                         }}
-                        onFallback={setAgentType}
+                        onFallback={(a) => {
+                          setAgentType(a)
+                          setModeId(null)
+                          setConfigValues({})
+                          commit()
+                        }}
                       />
                     </div>
                     <AgentConfigSection
@@ -495,15 +549,19 @@ function TaskSettingsBody({
                       modeId={modeId}
                       configValues={configValues}
                       layout="inline"
-                      onModeChange={setModeId}
-                      onConfigChange={(optionId, valueId) =>
+                      onModeChange={(m) => {
+                        setModeId(m)
+                        commit()
+                      }}
+                      onConfigChange={(optionId, valueId) => {
                         setConfigValues((prev) => {
                           const next = { ...prev }
                           if (valueId === null) delete next[optionId]
                           else next[optionId] = valueId
                           return next
                         })
-                      }
+                        commit()
+                      }}
                     />
                   </div>
                 </SettingRow>
@@ -521,7 +579,10 @@ function TaskSettingsBody({
                     <Switch
                       id="task-auto-process"
                       checked={autoProcess}
-                      onCheckedChange={setAutoProcess}
+                      onCheckedChange={(v) => {
+                        setAutoProcess(v)
+                        commit()
+                      }}
                     />
                   }
                 />
@@ -533,6 +594,7 @@ function TaskSettingsBody({
                   control={
                     <Input
                       id="task-max-concurrent"
+                      onBlur={commit}
                       inputMode="numeric"
                       value={maxConcurrent}
                       onChange={(e) =>
@@ -558,6 +620,7 @@ function TaskSettingsBody({
                     <div className="flex items-center gap-1.5">
                       <Input
                         id="task-auto-compact"
+                        onBlur={commit}
                         inputMode="numeric"
                         value={autoCompactPercent}
                         onChange={(e) =>
@@ -579,6 +642,7 @@ function TaskSettingsBody({
                 >
                   <Input
                     id="task-compact-command"
+                    onBlur={commit}
                     value={compactCommand}
                     onChange={(e) => setCompactCommand(e.target.value)}
                     placeholder={t("settingsCompactCommandPlaceholder")}
@@ -611,7 +675,10 @@ function TaskSettingsBody({
                           type="button"
                           role="radio"
                           aria-checked={active}
-                          onClick={() => setMergeStrategy(opt.value)}
+                          onClick={() => {
+                            setMergeStrategy(opt.value)
+                            commit()
+                          }}
                           className={cn(
                             "flex gap-2 rounded-lg border p-2.5 text-left transition-colors",
                             "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
@@ -660,7 +727,10 @@ function TaskSettingsBody({
                     <Switch
                       id="task-auto-merge"
                       checked={autoMerge}
-                      onCheckedChange={setAutoMerge}
+                      onCheckedChange={(v) => {
+                        setAutoMerge(v)
+                        commit()
+                      }}
                     />
                   }
                 />
@@ -673,7 +743,10 @@ function TaskSettingsBody({
                     <Switch
                       id="task-delete-worktree"
                       checked={deleteWorktreeDefault}
-                      onCheckedChange={setDeleteWorktreeDefault}
+                      onCheckedChange={(v) => {
+                        setDeleteWorktreeDefault(v)
+                        commit()
+                      }}
                     />
                   }
                 />
@@ -699,6 +772,7 @@ function TaskSettingsBody({
                     id="task-worktree-root"
                     value={worktreeRoot}
                     onValueChange={setWorktreeRoot}
+                    onCommit={commit}
                     placeholder={t("settingsWorktreeRootPlaceholder")}
                     browseLabel={t("settingsWorktreeRootBrowse")}
                     browserTitle={t("settingsWorktreeRoot")}
@@ -717,6 +791,7 @@ function TaskSettingsBody({
                 >
                   <Input
                     id="task-init-command"
+                    onBlur={commit}
                     value={initCommand}
                     onChange={(e) => setInitCommand(e.target.value)}
                     placeholder={t("settingsInitCommandPlaceholder")}
@@ -731,6 +806,7 @@ function TaskSettingsBody({
                 >
                   <Input
                     id="task-preflight-command"
+                    onBlur={commit}
                     value={preflightCommand}
                     onChange={(e) => setPreflightCommand(e.target.value)}
                     placeholder={t("settingsPreflightCustomPlaceholder")}
@@ -785,6 +861,7 @@ function TaskSettingsBody({
                 >
                   <Textarea
                     id="task-stage-prompt"
+                    onBlur={commit}
                     aria-label={t(activeStage.labelKey)}
                     value={stagePrompts[stage] ?? ""}
                     onChange={(e) =>
@@ -802,24 +879,6 @@ function TaskSettingsBody({
           </Tabs>
         ) : null}
       </div>
-
-      <DialogFooter>
-        <Button
-          type="button"
-          variant="ghost"
-          onClick={onClose}
-          disabled={saving}
-        >
-          {t("cancel")}
-        </Button>
-        <Button
-          type="button"
-          onClick={save}
-          disabled={saving || loaded == null}
-        >
-          {t("save")}
-        </Button>
-      </DialogFooter>
     </>
   )
 }
