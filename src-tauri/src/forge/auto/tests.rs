@@ -560,6 +560,7 @@ mod against_a_forge {
         FailFirst,
         /// Already merged — a refusal that will repeat every time.
         Merged,
+        Sticky,
     }
 
     fn issue(number: i64, labels: &[&str], author: &str) -> serde_json::Value {
@@ -596,6 +597,21 @@ mod against_a_forge {
                     let seen = seen.clone();
                     async move {
                         seen.lock().unwrap().push(q);
+                        if matches!(pulls, Pulls::Sticky) {
+                            let mut items = vec![
+                                issue(1, &["bug", "openai-tracking"], "alice"),
+                                issue(2, &["bug"], "alice"),
+                                issue(3, &["bug", "client-release:drift"], "alice"),
+                                issue(4, &["bug", "upstream-merge-needed"], "alice"),
+                            ];
+                            let mut closed = issue(5, &["bug", "openai-tracking"], "alice");
+                            closed["state"] = serde_json::json!("closed");
+                            items.push(closed);
+                            for item in &mut items {
+                                item["updated_at"] = serde_json::json!("2000-01-01T00:00:00Z");
+                            }
+                            return Json(serde_json::json!(items));
+                        }
                         Json(serde_json::json!([
                             issue(1, &["bug"], "alice"),
                             issue(2, &["bug", "wontfix"], "alice"),
@@ -709,6 +725,82 @@ mod against_a_forge {
         crate::keyring_store::set_token("acc-auto", "tok-auto").unwrap();
     }
 
+    #[tokio::test]
+    async fn unchanged_sticky_issues_recur_after_review_but_not_while_pending_or_running() {
+        use crate::db::entities::work_task;
+        use crate::models::WorkTaskStatus;
+        use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, Set};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let data = data.to_string_lossy().to_string();
+        temp_env::async_with_vars([("CODEG_DATA_DIR", Some(data.as_str()))], async move {
+            let (p, folder, seen) = on_forge(tmp.path(), Pulls::Sticky).await;
+            save_auto(&p, Some(folder), bug_rules()).await;
+            let first = p.scan(folder, Trigger::Manual).await.unwrap();
+            assert!(first.failed.is_empty(), "{first:?}");
+            assert_eq!(
+                first.created.iter().map(|t| t.number).collect::<Vec<_>>(),
+                vec![1, 2, 3, 4]
+            );
+            assert_eq!(first.skipped.get(&rules::Skip::NotOpen), Some(&1));
+            let ordinary = first
+                .created
+                .iter()
+                .find(|t| t.number == 2)
+                .unwrap()
+                .task_id;
+            let mut sticky: Vec<i32> = first
+                .created
+                .iter()
+                .filter(|t| t.number != 2)
+                .map(|t| t.task_id)
+                .collect();
+            // Ordinary history survives deletion, while sticky reviews are history
+            // for the next cycle. These rows have never changed since year 2000.
+            work_task_service::soft_delete(&p.db.conn, ordinary, WorkTaskStatus::Todo)
+                .await
+                .unwrap();
+            for status in [
+                WorkTaskStatus::Todo,
+                WorkTaskStatus::Queued,
+                WorkTaskStatus::Running,
+                WorkTaskStatus::Review,
+                WorkTaskStatus::Review,
+            ] {
+                for id in &sticky {
+                    let mut row = work_task::Entity::find_by_id(*id)
+                        .one(&p.db.conn)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .into_active_model();
+                    row.status = Set(status);
+                    row.update(&p.db.conn).await.unwrap();
+                }
+                let scan = p.scan(folder, Trigger::Manual).await.unwrap();
+                assert!(scan.error.is_none() && scan.failed.is_empty(), "{scan:?}");
+                if status == WorkTaskStatus::Review {
+                    assert_eq!(
+                        scan.created.iter().map(|t| t.number).collect::<Vec<_>>(),
+                        vec![1, 3, 4],
+                        "{scan:?}"
+                    );
+                    sticky = scan.created.iter().map(|t| t.task_id).collect();
+                } else {
+                    assert!(scan.created.is_empty(), "{status:?}: {scan:?}");
+                }
+            }
+            assert!(seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|q| !q.contains_key("since")));
+        })
+        .await;
+    }
+
     /// The whole loop on one scan: rules decide, every match becomes exactly
     /// one task, the timeline says it was automatic — and the next scan, and
     /// the one after the user deleted a task, mint nothing more.
@@ -786,7 +878,8 @@ mod against_a_forge {
             let last_query = seen.lock().unwrap().last().cloned().unwrap();
             assert_eq!(
                 last_query.get("since"),
-                Some(&forge_core::scan_timestamp(window))
+                None,
+                "read unchanged sticky issues too"
             );
             assert_eq!(last_query.get("state").map(String::as_str), Some("open"));
 

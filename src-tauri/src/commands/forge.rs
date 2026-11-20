@@ -375,7 +375,7 @@ fn forge_instruction(
              changed. Finding a different cause than the report guessed is not that: fix the \
              cause you found.\n\nOpen your reply with your verdict on the report — whether \
              it holds up, in one line — then say how you confirmed it, what you changed and \
-             why, and how you verified it."
+             why, and how you verified it.\n\nWhen an issue is fully resolved, close that issue as part of completion. If the work is delivered by a pull request, put `Closes #{number}` in the pull request body and let the forge close the issue when the pull request lands; do not close it early. A `*-tracking` issue is a long-lived queue and must stay open."
         ),
         ForgeScenario::PlanFirst => format!(
             "Plan issue #{number} ({url}): judge the report first, then plan the change. This \
@@ -1226,6 +1226,8 @@ pub enum ForgeTaskOrigin {
     User,
     /// Auto-processing, and what woke it.
     Auto(crate::forge::auto::Trigger),
+    /// An open sticky issue may recur once its agent has finished.
+    AutoSticky(crate::forge::auto::Trigger),
 }
 
 /// The scenario an automatic task of this kind runs, by wire name: the one
@@ -1441,7 +1443,9 @@ pub async fn create_forge_task(
 
     let auto_trigger = match origin {
         ForgeTaskOrigin::User => None,
-        ForgeTaskOrigin::Auto(trigger) => Some(trigger.as_str()),
+        ForgeTaskOrigin::Auto(trigger) | ForgeTaskOrigin::AutoSticky(trigger) => {
+            Some(trigger.as_str())
+        }
     };
     match work_task_service::create_from_forge_by(
         &db.conn,
@@ -1449,6 +1453,7 @@ pub async fn create_forge_task(
         source_row,
         draft.force,
         auto_trigger,
+        matches!(origin, ForgeTaskOrigin::AutoSticky(_)),
     )
     .await?
     {

@@ -90,6 +90,19 @@ pub fn evaluate(rules: &ForgeAutoSettings, row: &ForgeIssueRow) -> Result<(), Sk
     Ok(())
 }
 
+/// Sticky issue labels opt into scan-driven reprocessing.  They are still
+/// issues only: a pull request carrying one of these labels must keep the
+/// ordinary one-shot behaviour.
+pub fn is_sticky(row: &ForgeIssueRow) -> bool {
+    !row.is_pr
+        && row.labels.iter().any(|label| {
+            let name = label.name.trim().to_ascii_lowercase();
+            name == "upstream-merge-needed"
+                || name == "client-release:drift"
+                || name.ends_with("-tracking")
+        })
+}
+
 /// Whether any of `patterns` matches `text`.
 pub fn any_matches(patterns: &[String], text: &str) -> bool {
     patterns
@@ -264,6 +277,27 @@ mod tests {
             ..rules()
         };
         assert_eq!(evaluate(&drafts_welcome, &draft), Ok(()));
+    }
+
+    #[test]
+    fn sticky_labels_are_exact_and_issue_only() {
+        assert!(is_sticky(&row(
+            false,
+            &["upstream-merge-needed"],
+            Some("a")
+        )));
+        assert!(is_sticky(&row(false, &["client-release:drift"], Some("a"))));
+        assert!(is_sticky(&row(false, &["tokenkey-tracking"], Some("a"))));
+        assert!(!is_sticky(&row(
+            false,
+            &["client-release:board"],
+            Some("a")
+        )));
+        assert!(!is_sticky(&row(
+            true,
+            &["upstream-merge-needed"],
+            Some("a")
+        )));
     }
 
     /// No rules at all is "every open item of the wanted kinds".

@@ -576,7 +576,7 @@ pub async fn create_from_forge(
     source: crate::models::WorkTaskSource,
     force: bool,
 ) -> Result<ForgeCreateOutcome, DbError> {
-    create_from_forge_by(conn, draft, source, force, None).await
+    create_from_forge_by(conn, draft, source, force, None, false).await
 }
 
 /// [`create_from_forge`], saying who asked: `auto_trigger = None` is a person
@@ -590,6 +590,7 @@ pub async fn create_from_forge_by(
     source: crate::models::WorkTaskSource,
     force: bool,
     auto_trigger: Option<&str>,
+    recurring: bool,
 ) -> Result<ForgeCreateOutcome, DbError> {
     validate_draft(&draft)?;
     let folder = folder::Entity::find_by_id(draft.folder_id)
@@ -618,7 +619,7 @@ pub async fn create_from_forge_by(
     let row = insert_todo_row(&txn, &draft, config_str, max_order, now, Some(&source)).await?;
     if !force {
         let keys: Vec<String> = source.keys().cloned().collect();
-        let conflicts = other_active_for_keys(&txn, row.id, &keys).await?;
+        let conflicts = other_active_for_keys_by(&txn, row.id, &keys, recurring).await?;
         if !conflicts.is_empty() {
             txn.rollback().await?;
             return Ok(ForgeCreateOutcome::Duplicate(
@@ -679,12 +680,27 @@ pub async fn source_keys_ever_tasked(
     Ok(found)
 }
 
+/// Sticky issues wait for pending/executing tasks, but agent-complete review
+/// cards do not block the next scan. The transactional create uses the same
+/// exception; ordinary creates and resurrection guards retain their policy.
+pub async fn source_keys_active(
+    conn: &DatabaseConnection,
+    keys: &[String],
+) -> Result<std::collections::HashSet<String>, DbError> {
+    Ok(other_active_for_keys_by(conn, -1, keys, true)
+        .await?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect())
+}
+
 /// How many keys one `IN (…)` carries — far below SQLite's bound-parameter
 /// limit, whatever a caller hands in.
 const KEY_CHUNK: usize = 500;
 
-/// Every non-terminal status — the single definition of "active" shared by
-/// the create dedup and the resurrection guards, so the two can never drift.
+/// Default active set for creates and resurrection guards. Recurring scans
+/// exclude Review through other_active_for_keys_by: the agent finished that
+/// cycle even while its result is waiting for human review.
 pub const ACTIVE_STATUSES: [WorkTaskStatus; 7] = [
     WorkTaskStatus::Todo,
     WorkTaskStatus::Queued,
@@ -729,19 +745,30 @@ pub async fn other_active_for_keys<C: ConnectionTrait>(
     task_id: i32,
     keys: &[String],
 ) -> Result<Vec<(String, work_task::Model)>, DbError> {
+    other_active_for_keys_by(conn, task_id, keys, false).await
+}
+
+async fn other_active_for_keys_by<C: ConnectionTrait>(
+    conn: &C,
+    task_id: i32,
+    keys: &[String],
+    recurring: bool,
+) -> Result<Vec<(String, work_task::Model)>, DbError> {
     let mut newest: std::collections::HashMap<String, work_task::Model> =
         std::collections::HashMap::new();
     for chunk in keys.chunks(KEY_CHUNK) {
-        let rows = work_task_source_key::Entity::find()
+        let mut query = work_task_source_key::Entity::find()
             .filter(work_task_source_key::Column::SourceKey.is_in(chunk.iter().cloned()))
             .filter(work_task_source_key::Column::TaskId.ne(task_id))
             .find_also_related(work_task::Entity)
             .filter(work_task::Column::DeletedAt.is_null())
             .filter(work_task::Column::Status.is_in(ACTIVE_STATUSES))
             .order_by_desc(work_task::Column::CreatedAt)
-            .order_by_desc(work_task::Column::Id)
-            .all(conn)
-            .await?;
+            .order_by_desc(work_task::Column::Id);
+        if recurring {
+            query = query.filter(work_task::Column::Status.ne(WorkTaskStatus::Review));
+        }
+        let rows = query.all(conn).await?;
         for (item, task) in rows {
             if let Some(task) = task {
                 newest.entry(item.source_key).or_insert(task);
@@ -5654,6 +5681,72 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn recurring_create_ignores_reviews_but_serializes_pending_work() {
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/recurring-forge").await;
+        let key = "github:github.com:acme/app:issue:123";
+        let first = match create_from_forge(&db.conn, draft(folder, "first"), source(key), false)
+            .await
+            .unwrap()
+        {
+            ForgeCreateOutcome::Created(task) => task,
+            other => panic!("{other:?}"),
+        };
+        work_task::Entity::update_many()
+            .col_expr(
+                work_task::Column::Status,
+                Expr::value(WorkTaskStatus::Review),
+            )
+            .filter(work_task::Column::Id.eq(first.id))
+            .exec(&db.conn)
+            .await
+            .unwrap();
+        // A normal trigger still protects the review card.
+        assert!(matches!(
+            create_from_forge(&db.conn, draft(folder, "normal"), source(key), false)
+                .await
+                .unwrap(),
+            ForgeCreateOutcome::Duplicate(_)
+        ));
+        // Two scanners racing on the same sticky issue create one replacement.
+        let (a, b) = tokio::join!(
+            create_from_forge_by(
+                &db.conn,
+                draft(folder, "cycle a"),
+                source(key),
+                false,
+                Some("manual"),
+                true
+            ),
+            create_from_forge_by(
+                &db.conn,
+                draft(folder, "cycle b"),
+                source(key),
+                false,
+                Some("manual"),
+                true
+            ),
+        );
+        let outcomes = [a.unwrap(), b.unwrap()];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|r| matches!(r, ForgeCreateOutcome::Created(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|r| matches!(r, ForgeCreateOutcome::Duplicate(_)))
+                .count(),
+            1
+        );
+        let active = source_keys_active(&db.conn, &[key.into()]).await.unwrap();
+        assert!(active.contains(key));
     }
 
     /// A finished task is history, not a blocker: dedup only counts the
