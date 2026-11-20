@@ -619,7 +619,14 @@ pub async fn create_from_forge_by(
     let row = insert_todo_row(&txn, &draft, config_str, max_order, now, Some(&source)).await?;
     if !force {
         let keys: Vec<String> = source.keys().cloned().collect();
-        let conflicts = other_active_for_keys_by(&txn, row.id, &keys, recurring).await?;
+        let scope = if recurring {
+            SourceTaskScope::Recurring
+        } else if auto_trigger.is_some() {
+            SourceTaskScope::History
+        } else {
+            SourceTaskScope::Active
+        };
+        let conflicts = other_tasks_for_keys(&txn, row.id, &keys, scope).await?;
         if !conflicts.is_empty() {
             txn.rollback().await?;
             return Ok(ForgeCreateOutcome::Duplicate(
@@ -652,8 +659,8 @@ pub async fn create_from_forge_by(
 /// Which of `keys` have EVER had a task — any status, archived and deleted
 /// rows included.
 ///
-/// The question auto-processing asks before it mints anything, and it is
-/// deliberately wider than the create dedup (live tasks only): an item whose
+/// The question auto-processing asks before it mints anything, also checked
+/// by ordinary automatic creates inside their transaction: an item whose
 /// automatic task was finished, canceled or deleted has been dealt with, and
 /// picking it up again on the next scan would undo the user's own decision
 /// every few minutes. Starting another task by hand stays possible — that path
@@ -687,7 +694,7 @@ pub async fn source_keys_active(
     conn: &DatabaseConnection,
     keys: &[String],
 ) -> Result<std::collections::HashSet<String>, DbError> {
-    Ok(other_active_for_keys_by(conn, -1, keys, true)
+    Ok(other_tasks_for_keys(conn, -1, keys, SourceTaskScope::Recurring)
         .await?
         .into_iter()
         .map(|(key, _)| key)
@@ -698,8 +705,8 @@ pub async fn source_keys_active(
 /// limit, whatever a caller hands in.
 const KEY_CHUNK: usize = 500;
 
-/// Default active set for creates and resurrection guards. Recurring scans
-/// exclude Review through other_active_for_keys_by: the agent finished that
+/// Default active set for manual creates and resurrection guards. Recurring
+/// scans exclude Review through other_tasks_for_keys: the agent finished that
 /// cycle even while its result is waiting for human review.
 pub const ACTIVE_STATUSES: [WorkTaskStatus; 7] = [
     WorkTaskStatus::Todo,
@@ -745,14 +752,21 @@ pub async fn other_active_for_keys<C: ConnectionTrait>(
     task_id: i32,
     keys: &[String],
 ) -> Result<Vec<(String, work_task::Model)>, DbError> {
-    other_active_for_keys_by(conn, task_id, keys, false).await
+    other_tasks_for_keys(conn, task_id, keys, SourceTaskScope::Active).await
 }
 
-async fn other_active_for_keys_by<C: ConnectionTrait>(
+#[derive(Clone, Copy)]
+enum SourceTaskScope {
+    Active,
+    Recurring,
+    History,
+}
+
+async fn other_tasks_for_keys<C: ConnectionTrait>(
     conn: &C,
     task_id: i32,
     keys: &[String],
-    recurring: bool,
+    scope: SourceTaskScope,
 ) -> Result<Vec<(String, work_task::Model)>, DbError> {
     let mut newest: std::collections::HashMap<String, work_task::Model> =
         std::collections::HashMap::new();
@@ -761,11 +775,14 @@ async fn other_active_for_keys_by<C: ConnectionTrait>(
             .filter(work_task_source_key::Column::SourceKey.is_in(chunk.iter().cloned()))
             .filter(work_task_source_key::Column::TaskId.ne(task_id))
             .find_also_related(work_task::Entity)
-            .filter(work_task::Column::DeletedAt.is_null())
-            .filter(work_task::Column::Status.is_in(ACTIVE_STATUSES))
             .order_by_desc(work_task::Column::CreatedAt)
             .order_by_desc(work_task::Column::Id);
-        if recurring {
+        if !matches!(scope, SourceTaskScope::History) {
+            query = query
+                .filter(work_task::Column::DeletedAt.is_null())
+                .filter(work_task::Column::Status.is_in(ACTIVE_STATUSES));
+        }
+        if matches!(scope, SourceTaskScope::Recurring) {
             query = query.filter(work_task::Column::Status.ne(WorkTaskStatus::Review));
         }
         let rows = query.all(conn).await?;
@@ -5681,6 +5698,76 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// A second scanner can reach create after its stale history check, once
+    /// the first task has already finished or been deleted.
+    #[tokio::test]
+    async fn automatic_create_dedups_history_inside_the_transaction() {
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/automatic-history").await;
+        let key = "github:github.com:acme/app:issue:123";
+        let first = match create_from_forge(&db.conn, draft(folder, "first"), source(key), false)
+            .await
+            .unwrap()
+        {
+            ForgeCreateOutcome::Created(task) => task,
+            other => panic!("{other:?}"),
+        };
+        for status in [
+            WorkTaskStatus::Done,
+            WorkTaskStatus::Failed,
+            WorkTaskStatus::Canceled,
+        ] {
+            work_task::Entity::update_many()
+                .col_expr(work_task::Column::Status, Expr::value(status))
+                .filter(work_task::Column::Id.eq(first.id))
+                .exec(&db.conn)
+                .await
+                .unwrap();
+            for deleted in [false, true] {
+                work_task::Entity::update_many()
+                    .col_expr(
+                        work_task::Column::DeletedAt,
+                        Expr::value(deleted.then(Utc::now)),
+                    )
+                    .filter(work_task::Column::Id.eq(first.id))
+                    .exec(&db.conn)
+                    .await
+                    .unwrap();
+                match create_from_forge_by(
+                    &db.conn,
+                    draft(folder, "stale scanner"),
+                    source(key),
+                    false,
+                    Some("manual"),
+                    false,
+                )
+                .await
+                .unwrap()
+                {
+                    ForgeCreateOutcome::Duplicate(conflicts) => {
+                        assert_eq!(conflicts.len(), 1);
+                        assert_eq!(conflicts[0].existing.id, first.id);
+                    }
+                    other => panic!("{status:?}, deleted={deleted}: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(
+            list(&db.conn, Some(folder)).await.unwrap().len(),
+            0,
+            "rejected automatic creates roll back their rows"
+        );
+        assert!(
+            matches!(
+                create_from_forge(&db.conn, draft(folder, "explicit retry"), source(key), false)
+                    .await
+                    .unwrap(),
+                ForgeCreateOutcome::Created(_)
+            ),
+            "manual triggers can still revisit history"
+        );
     }
 
     #[tokio::test]
