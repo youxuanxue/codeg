@@ -321,9 +321,19 @@ pub fn external_transcript_sources() -> Vec<ExternalSource> {
             indexes: &[],
         },
         ExternalSource {
-            // Archive native conversations only, never the surrounding
-            // account/settings tree. Legacy .meta sidecars are optional.
+            // Preserve the archive namespace used by existing Python-server
+            // backups so restore still targets the legacy store.
             agent: "antigravity",
+            root: antigravity::resolve_antigravity_legacy_sessions_dir(),
+            is_file: false,
+            sqlite: true,
+            include_top: None,
+            indexes: &[],
+        },
+        ExternalSource {
+            // Separate namespace: native and legacy IDs may coincide. Archive
+            // conversations only, never the surrounding account/settings tree.
+            agent: "antigravity-native",
             root: antigravity::resolve_antigravity_sessions_dir(),
             is_file: false,
             sqlite: true,

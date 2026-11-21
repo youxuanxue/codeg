@@ -499,8 +499,8 @@ fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> Ant
 /// Native `<GEMINI_HOME>/antigravity-cli` for this launch.
 ///
 /// Resolved through the agent's OWN rules ([`crate::parsers::antigravity`]), not
-/// a local `PathBuf::from`, because `GEMINI_HOME` is one of the variables whose
-/// upstream runs `os.path.expanduser`. Building the path by hand made
+/// a local `PathBuf::from`, because Codeg supports home-prefixed `GEMINI_HOME`
+/// and passes the resolved root through native CLI flags. A bare join made
 /// `GEMINI_HOME=~/somewhere` mean two different directories: the server read
 /// `$HOME/somewhere`, while codeg created a folder literally named `~` under
 /// whatever directory it happened to be launched from — and wrote the
@@ -726,7 +726,7 @@ pub fn is_antigravity_auth_method(method_id: &str) -> bool {
 /// unconfigured row. Used to keep API-key mode out of account logout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AntigravityAuthType {
-    /// The file names this method, in its canonical spelling.
+    /// Codeg or the native provider identifies this authentication method.
     Declared(String),
     /// No file, or a file that names no method. The server has nothing to
     /// infer from either, and falls back to its own defaults.

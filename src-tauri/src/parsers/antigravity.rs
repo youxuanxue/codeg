@@ -110,6 +110,16 @@ pub(crate) fn resolve_antigravity_sessions_dir() -> PathBuf {
     resolve_antigravity_sessions_dir_for_env(&AgentEnv::inherited())
 }
 
+pub(crate) fn resolve_antigravity_legacy_sessions_dir() -> PathBuf {
+    resolve_antigravity_legacy_sessions_dir_for_env(&AgentEnv::inherited())
+}
+
+fn resolve_antigravity_legacy_sessions_dir_for_env(env: &AgentEnv) -> PathBuf {
+    resolve_gemini_home_for_env(env)
+        .join(ACP_SUBDIR)
+        .join(SESSIONS_DIR_NAME)
+}
+
 /// [`resolve_antigravity_sessions_dir`] for the server launched with `env`.
 pub(crate) fn resolve_antigravity_sessions_dir_for_env(env: &AgentEnv) -> PathBuf {
     resolve_gemini_home_for_env(env)
@@ -526,11 +536,7 @@ impl AntigravityParser {
     pub fn for_env(env: &AgentEnv) -> Self {
         Self {
             base_dir: resolve_antigravity_sessions_dir_for_env(env),
-            legacy_dir: Some(
-                resolve_gemini_home_for_env(env)
-                    .join(ACP_SUBDIR)
-                    .join(SESSIONS_DIR_NAME),
-            ),
+            legacy_dir: Some(resolve_antigravity_legacy_sessions_dir_for_env(env)),
         }
     }
 

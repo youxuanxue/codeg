@@ -1089,6 +1089,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn antigravity_backup_preserves_both_stores_and_legacy_archive_routes() {
+        let sources = external_transcript_sources();
+        let home = crate::parsers::antigravity::resolve_gemini_home();
+        for (agent, subtree) in [
+            ("antigravity", "antigravity-acp"),
+            ("antigravity-native", "antigravity-cli"),
+        ] {
+            let registered = sources.iter().find(|s| s.agent == agent).unwrap();
+            let expected = home.join(subtree).join("conversations");
+            let entry = format!("external/{agent}/same-id.db");
+            let (_, base, target) = map_external_to_target(&entry, &sources).unwrap();
+            // Existing archives retain their legacy destination. Native IDs
+            // occupy a separate namespace, including when IDs coincide.
+            assert_eq!(registered.root, expected);
+            assert_eq!(base, expected);
+            assert_eq!(target, expected.join("same-id.db"));
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join(subtree).join("conversations");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.parent().unwrap().join("acp_token.json"), "secret").unwrap();
+            let conn = seed_store(&root.join("same-id.db"));
+            let meta = r#"{"cwd":"/original/workspace"}"#;
+            std::fs::write(root.join("same-id.meta"), meta).unwrap();
+            let source = ExternalSource {
+                root,
+                ..registered.clone()
+            };
+            let (mut entries, degraded) = pack_one(&source, dir.path());
+            entries.sort();
+            assert_eq!(
+                entries,
+                vec![entry, format!("external/{agent}/same-id.meta")]
+            );
+            assert!(degraded.is_empty(), "{degraded:?}");
+            drop(conn);
+
+            let archive = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.extension().is_some_and(|e| e == "zip"))
+                .unwrap();
+            let unpacked = dir.path().join("unpacked");
+            zip::ZipArchive::new(File::open(archive).unwrap())
+                .unwrap()
+                .extract(&unpacked)
+                .unwrap();
+            let restored_root = dir.path().join("restored");
+            let restore_source = ExternalSource {
+                root: restored_root.clone(),
+                ..source
+            };
+            restore_external_with_sources(
+                &unpacked.join("external"),
+                &[restore_source],
+                ConflictPolicy::SkipExisting,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            assert_eq!(count_rows(&restored_root.join("same-id.db")).unwrap(), 2);
+            assert_eq!(
+                std::fs::read_to_string(restored_root.join("same-id.meta")).unwrap(),
+                meta
+            );
+        }
+    }
+
     /// deepseek-acp 0.6.0 puts prompt images in a content-addressed store that
     /// is NOT under the session-log root, and the log keeps only a `sha256:`
     /// reference. If the store is not archived, restoring on a clean machine

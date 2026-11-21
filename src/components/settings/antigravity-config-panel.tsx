@@ -875,18 +875,12 @@ export function AntigravityConfigPanel({
 
         {usesBrowserSignIn(method) ? <NativeSignIn /> : null}
 
-        {/* Not gated on `persistedIncomplete`, unlike the sign-in beside it:
-            discarding a credential needs no project, no location and no key,
-            and a user whose stored row is half-filled is exactly the one who
-            may need to get out of the account it belongs to. */}
+        {/* Signing out remains available even with incomplete project fields. */}
         {usesBrowserSignIn(method) ? (
           <SignOut disabled={busy} onSignedOut={onSignedOut} />
         ) : null}
 
-        {/* The save landed in the database but not in the file the server
-            reads, so the choice above is NOT what the next session will
-            authenticate with. Names the file and the reason, because the fix
-            is to edit that file by hand — codeg will not touch it again. */}
+        {/* Keep unsafe native settings merges visible until the next save. */}
         {syncSkip ? (
           <div className="space-y-1 rounded-md border border-amber-500/40 bg-amber-500/5 p-2">
             <p className="text-2xs text-amber-600 dark:text-amber-400">
