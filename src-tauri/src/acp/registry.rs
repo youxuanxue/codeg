@@ -8159,7 +8159,7 @@ mod tests {
             AgentType::Gemini,
             "0.60.0",
             "@google/gemini-cli@0.60.0",
-            Some("20.0.0"),
+            Some("20.6.0"),
         );
         // OpenClaw's floor is a RUNTIME gate (`node-version.mjs`), not just
         // `engines` metadata: 2026.9.3 retired the Node 22 lane and 2026.9.8
