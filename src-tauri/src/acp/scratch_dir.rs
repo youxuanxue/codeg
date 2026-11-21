@@ -5,8 +5,8 @@
 //! Some agent binaries are self-extracting archives that unpack into the system
 //! temp directory on every launch and only clean up on a GRACEFUL exit. codeg
 //! ends agent processes with `kill_tree`, which on Windows terminates
-//! unconditionally, so that cleanup never runs. The Antigravity ACP server is
-//! the acute case: its Windows build is a PyInstaller *onefile* whose archive
+//! unconditionally, so that cleanup never runs. The retired Python Antigravity ACP server was
+//! the acute case: its Windows build was a PyInstaller *onefile* whose archive
 //! unpacks to **1.17 GB** per launch (verified against the shipped binary: 8261
 //! TOC entries, 1192.3 MB of `b` entries plus an 8.7 MB PYZ). One user
 //! accumulated 113 orphaned `%TEMP%\_MEI*` directories totalling 107.70 GB in
@@ -19,7 +19,7 @@
 //! then `USERPROFILE`. Pointing those at a directory codeg owns turns an
 //! unbounded leak into a directory codeg can delete.
 //!
-//! macOS is the same bug two orders of magnitude smaller: that build is not
+//! That server on macOS had the same bug two orders of magnitude smaller: that build is not
 //! PyInstaller, but it still drops ~172 KB of read-only resource files into
 //! `TMPDIR` per launch and still leaks them when killed. So off Windows the
 //! isolation is applied to every agent launch rather than special-cased.
@@ -183,15 +183,15 @@ fn isolates_on(windows: bool, agent: AgentType) -> bool {
 
 /// Agents whose Windows build unpacks itself into the temp directory on every
 /// launch and cleans up only on a graceful exit: the leak this module exists
-/// for. Antigravity's server is a PyInstaller onefile (its registry entry
-/// records each version checked).
+/// for. The retired Antigravity Python server needed this; native agy does
+/// not. Keep the predicate for any future self-extracting Windows runtime.
 ///
 /// An allowlist rather than a list of agents that run Git Bash, because what a
 /// redirect breaks depends on which programs a session happens to start, not on
 /// the agent: any agent's commands can start Git's `bash.exe`, or `git` itself
 /// can start its `ssh.exe`.
-fn unpacks_into_temp_on_windows(agent: AgentType) -> bool {
-    matches!(agent, AgentType::Antigravity)
+fn unpacks_into_temp_on_windows(_agent: AgentType) -> bool {
+    false
 }
 
 /// A scratch root is only usable if a child can still bind a unix socket
@@ -1448,7 +1448,7 @@ mod tests {
             .copied()
             .filter(|agent| isolates_on(true, *agent))
             .collect();
-        assert_eq!(isolated, [AgentType::Antigravity]);
+        assert_eq!(isolated, Vec::<AgentType>::new());
         assert!(!isolates_on(true, AgentType::Custom("custom-agent")));
     }
 

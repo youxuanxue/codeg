@@ -1080,7 +1080,10 @@
       "saveRawConfig": "儲存檔案"
     },
     "antigravity": {
-      "configDescription": "Antigravity 必须先选定认证方式才能开始会话。所选方式会写入 $GEMINI_HOME/antigravity-acp/settings.json 的 auth.type —— 这是 ACP 服务端唯一读取的位置，不写就每次新建会话都会报 “Authentication required”。模型与会话模式不在这里：Antigravity 通过 ACP 上报它们，由输入框的选择器按会话管理。",
+      "nativeLoginHint": "For Google sign-in, run this command in a terminal on the Codeg host, then reopen the session. With a custom GEMINI_HOME, add the same --gemini-dir path.",
+      "baseUrlLabel": "Custom API endpoint (optional)",
+      "baseUrlHint": "Root URL of a Gemini-compatible service such as TokenKey. Leave empty for Google. The API key is passed only to the agent process, never written to native settings.",
+      "configDescription": "Uses your installed agy acp and shares the native CLI settings and account. Select Gemini API key for TokenKey or another Gemini-compatible endpoint. Model and permission mode are managed per session.",
       "methodLabel": "认证方式",
       "methods": {
         "oauth-personal": "使用 Google 账号登录",
@@ -1089,9 +1092,9 @@
         "agent-platform": "Gemini Enterprise Agent Platform"
       },
       "methodHints": {
-        "oauth-personal": "你的 Google 账号，任意 Antigravity 套餐（含免费版）均可。首次新建会话会自动打开浏览器完成登录，之后令牌会被缓存复用。本機沒有瀏覽器？用下面的免瀏覽器登入。",
-        "oauth-business": "你的 Gemini Enterprise 账号。需要填 GCP 项目与区域，首次新建会话会打开浏览器。本機沒有瀏覽器？用下面的免瀏覽器登入。",
-        "gemini-api-key": "Gemini Developer API 的密钥，以 GEMINI_API_KEY 传给智能体。",
+        "oauth-personal": "Sign in with your Google account using agy acp --login on the Codeg host, then reopen the session.",
+        "oauth-business": "Use your Gemini Enterprise account with a GCP project and location. Complete native agy login on the Codeg host before reopening the session.",
+        "gemini-api-key": "Use a Gemini API key and an optional custom endpoint such as TokenKey. No Google sign-in is needed.",
         "agent-platform": "即原 Vertex AI。可用 API Key，或用项目 + 区域配合应用默认凭据（gcloud auth application-default login）。"
       },
       "geminiApiKeyLabel": "Gemini API Key",
@@ -1102,29 +1105,12 @@
       "missingGeminiApiKey": "请填写 Gemini API Key，或改用其他认证方式 —— 否则会话无法启动。",
       "missingAgentPlatformConfig": "请填写 API Key，或同时填写项目与区域 —— 二者缺一不可，否则会话无法启动。",
       "missingEnterpriseConfig": "Gemini Enterprise 需要同时填写项目与区域。",
-      "settingsFileHint": "auth.type 会保存到该文件；你自己写在里面的其他键会原样保留。",
-      "syncSkipped": "Your choice was saved, but codeg could not write it to the ACP server's settings.json, so Antigravity will keep authenticating the way that file says. Set auth.type in it yourself, or move it aside and save again.",
+      "settingsFileHint": "Native CLI settings; Codeg syncs only modelProvider and project settings for the selected authentication method.",
+      "syncSkipped": "Your choice was saved, but native CLI settings could not be synchronized. Resolve the reason below and save again.",
       "save": "保存",
-      "headless": {
-        "title": "在沒有瀏覽器的機器上登入",
-        "description": "Antigravity 的 Google 登入由智慧代理自己發起，瀏覽器必須開在執行代理的那台機器上。部署在無桌面伺服器上的 codeg 沒有瀏覽器，首次建立工作階段會等待 5 分鐘後失敗。改從這裡登入：把連結拿到任意裝置上開啟，再把跳轉後的網址貼回來。",
-        "start": "取得登入連結",
-        "saveFirst": "請先儲存——登入用的是已儲存的設定，而不是上面剛填的內容。",
-        "step1": "1. 開啟這個連結並登入 Google 帳號。",
-        "step2": "2. 瀏覽器最後會跳到 {redirectUri} 並顯示無法連線——這是正常的。把網址列裡的完整網址複製出來貼到下面。",
-        "copyLink": "複製連結",
-        "openLink": "在新分頁開啟",
-        "complete": "完成登入",
-        "cancel": "取消",
-        "signedIn": "已登入，新的工作階段將使用此帳號。",
-        "alreadySignedIn": "Antigravity 本來就持有有效權杖，無需連結即已登入。",
-        "failed": "登入未完成。",
-        "startFailed": "無法開始登入",
-        "credentialHint": "權杖快取在這裡。把這個檔案複製到其他無桌面機器，那台也就登入好了。"
-      },
       "signOut": {
         "title": "登入了錯誤的帳號？",
-        "description": "Antigravity 會快取登入時使用的 Google 帳號並靜默重複使用，所以再次登入也換不到別的帳號。登出會清除已儲存的憑證；正在執行的 Antigravity 工作階段會先被結束，否則它們會把舊帳號寫回去。",
+        "description": "Signing out removes the Google credential shared with the native agy CLI. Codeg stops its running Antigravity sessions first. Use agy acp --login to choose another account.",
         "action": "登出",
         "done": "已登出。重新登入即可選擇其他帳號。",
         "failed": "登出失敗"

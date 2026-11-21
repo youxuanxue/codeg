@@ -321,13 +321,19 @@ pub fn external_transcript_sources() -> Vec<ExternalSource> {
             indexes: &[],
         },
         ExternalSource {
-            // Antigravity keeps one SQLite trajectory + `.meta` sidecar per
-            // session under `<GEMINI_HOME>/antigravity-acp/conversations`
-            // (default `~/.gemini/...`). The root points at `conversations`
-            // and NOT at `antigravity-acp` itself, whose siblings are the
-            // OAuth token files (`acp_token.json`, `acp_business_token.json`)
-            // — those must never end up in a backup archive.
+            // Preserve the archive namespace used by existing Python-server
+            // backups so restore still targets the legacy store.
             agent: "antigravity",
+            root: antigravity::resolve_antigravity_legacy_sessions_dir(),
+            is_file: false,
+            sqlite: true,
+            include_top: None,
+            indexes: &[],
+        },
+        ExternalSource {
+            // Separate namespace: native and legacy IDs may coincide. Archive
+            // conversations only, never the surrounding account/settings tree.
+            agent: "antigravity-native",
             root: antigravity::resolve_antigravity_sessions_dir(),
             is_file: false,
             sqlite: true,
@@ -565,8 +571,8 @@ fn sanitize_text(text: &mut String) -> bool {
 /// sandbox refuses the slot; the Antigravity settings sync refuses the write).
 /// The cost is that this rare form is unsupported, not that it resolves wrongly.
 ///
-/// Deliberately NOT applied everywhere. Antigravity runs `os.path.expanduser`
-/// on `GEMINI_HOME` (`acp_server/paths.py`) and DeepSeek expands `DSH_HOME`
+/// Deliberately NOT applied everywhere. Antigravity supports home expansion
+/// on `GEMINI_HOME` before passing native flags; DeepSeek expands `DSH_HOME`
 /// (`dsh-home-paths`' `expandHomePath`), but Hermes's `get_hermes_home` is a
 /// bare `Path(val.strip())` and Codex, Claude and the rest are likewise
 /// verbatim. Expanding for one of those would point codeg at `$HOME/...` while
