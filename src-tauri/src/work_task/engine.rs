@@ -1777,8 +1777,8 @@ impl TaskEngine {
             },
         };
 
-        let branch = format!("task/{}", task.id);
-        let dir = format!("{}-task-{}", basename(&root.path), task.id);
+        let branch = format!("chore/task-{}", task.id);
+        let dir = format!("{}-wt-task-{}", basename(&root.path), task.id);
         // A configured root that does not exist yet (the folder's first task)
         // needs no `mkdir`: `git worktree add` creates the leading directories
         // along with the checkout.
@@ -14938,6 +14938,15 @@ mod tests {
             "the checkout's unmerged work does not come along"
         );
         let after = row(&engine, task_id).await;
+        assert_eq!(
+            after.work_branch.as_deref(),
+            Some(format!("chore/task-{task_id}").as_str())
+        );
+        assert!(Path::new(&wt.path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(&format!("-wt-task-{task_id}")));
         assert_eq!(after.base_branch.as_deref(), Some("main"));
         assert_eq!(after.base_sha.as_deref(), Some(origin_main.as_str()));
         assert_eq!(

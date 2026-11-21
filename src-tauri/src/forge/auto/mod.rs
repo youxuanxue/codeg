@@ -15,10 +15,11 @@
 //! - **One scan per folder at a time.** A webhook landing mid-scan is not
 //!   dropped and not run concurrently: the running scan runs once more when it
 //!   finishes, and that pass sees whatever the delivery was about.
-//! - **Every item at most once.** The pick-up check is "has this item EVER had
-//!   a task" (`source_keys_ever_tasked`), and the create path's own dedup still
-//!   stands behind it — so a duplicated delivery, an overlapping window or two
-//!   folders cloned from one repository all end in one task.
+//! - **Ordinary items once, sticky issues per scan.** Ordinary items use the
+//!   "has this item EVER had a task" check. Sticky issues (upstream merge,
+//!   client drift and tracking labels) use the live-task check instead, so an
+//!   open issue is revisited on a later scan after its previous task settles.
+//!   The create path's own dedup still stands behind both checks.
 //!
 //! Tasks are minted through the same entry point the trigger dialog uses
 //! (`commands::forge::create_forge_task`), so an automatic task passes every
@@ -536,21 +537,19 @@ impl AutoProcessor {
             &remote.owner_repo,
             auto.issues,
             auto.pull_requests,
-            since,
+            // Sticky issues must be read even when their content has not changed.
+            None,
             &from,
         )
         .await
         .map_err(|e| error_text(e.into()))?;
         report.truncated = listing.resume.is_some();
-        // The window is asked for server-side, and checked again here: a forge
-        // that quietly ignores its "updated since" parameter (an old self-hosted
-        // instance) would otherwise hand back every open item, and the window
-        // is the one thing standing between switching this on and a board full
-        // of the backlog.
+        // Read every open item. Only ordinary items use the update window;
+        // sticky issues recur on scans, including when they were not edited.
         let rows: Vec<ForgeIssueRow> = listing
             .rows
             .into_iter()
-            .filter(|row| within_window(row, since))
+            .filter(|row| rules::is_sticky(row) || within_window(row, since))
             .collect();
         report.examined = rows.len();
 
@@ -563,10 +562,11 @@ impl AutoProcessor {
         }
         report.matched = matched.len();
 
-        let mut keyed: Vec<(String, ForgeIssueRow)> = Vec::with_capacity(matched.len());
+        let mut keyed: Vec<(String, ForgeIssueRow, bool)> = Vec::with_capacity(matched.len());
         for row in matched {
+            let sticky = rules::is_sticky(&row);
             match source_key_of(&remote, &row) {
-                Some(key) => keyed.push((key, row)),
+                Some(key) => keyed.push((key, row, sticky)),
                 // Not a key this forge's coordinates can make — nothing could
                 // ever be minted for it, so it is a failure, not "handled".
                 None => report.failed.push(FailedItem {
@@ -576,14 +576,33 @@ impl AutoProcessor {
                 }),
             }
         }
-        let keys: Vec<String> = keyed.iter().map(|(key, _)| key.clone()).collect();
-        let handled = work_task_service::source_keys_ever_tasked(&self.db.conn, &keys)
+        let keys: Vec<String> = keyed.iter().map(|(key, _, _)| key.clone()).collect();
+        let ordinary_keys: Vec<String> = keyed
+            .iter()
+            .filter(|(_, _, sticky)| !sticky)
+            .map(|(key, _, _)| key.clone())
+            .collect();
+        let sticky_keys: Vec<String> = keyed
+            .iter()
+            .filter(|(_, _, sticky)| *sticky)
+            .map(|(key, _, _)| key.clone())
+            .collect();
+        let handled = work_task_service::source_keys_ever_tasked(&self.db.conn, &ordinary_keys)
+            .await
+            .map_err(|e| format!("the task board could not be read: {e}"))?;
+        let active_sticky = work_task_service::source_keys_active(&self.db.conn, &sticky_keys)
             .await
             .map_err(|e| format!("the task board could not be read: {e}"))?;
         let mut fresh: Vec<ForgeIssueRow> = keyed
             .into_iter()
-            .filter(|(key, _)| !handled.contains(key))
-            .map(|(_, row)| row)
+            .filter(|(key, _, sticky)| {
+                if *sticky {
+                    !active_sticky.contains(key)
+                } else {
+                    !handled.contains(key)
+                }
+            })
+            .map(|(_, row, _)| row)
             .collect();
         report.already_handled = keys.len() - fresh.len();
         // Oldest first, issues before changes: the board's order — and with it
@@ -603,7 +622,11 @@ impl AutoProcessor {
                 &self.emitter,
                 &self.db,
                 draft,
-                ForgeTaskOrigin::Auto(trigger),
+                if rules::is_sticky(&row) {
+                    ForgeTaskOrigin::AutoSticky(trigger)
+                } else {
+                    ForgeTaskOrigin::Auto(trigger)
+                },
             )
             .await
             {

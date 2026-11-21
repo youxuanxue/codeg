@@ -2157,6 +2157,23 @@ pub async fn git_new_branch(
     Ok(())
 }
 
+fn worktree_helper() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    [
+        ".codex/skills",
+        ".claude/skills",
+        ".agents/skills",
+        ".cursor/skills",
+    ]
+    .iter()
+    .map(|root| {
+        home.join(root)
+            .join("git-worktree-submodule/scripts/wtree.py")
+    })
+    .find(|path| path.is_file())
+    .and_then(|path| path.canonicalize().ok())
+}
+
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn git_worktree_add(
     path: String,
@@ -2187,6 +2204,52 @@ pub async fn git_worktree_add(
             AppCommandError::already_exists("Worktree directory already exists")
                 .with_detail(worktree_path),
         );
+    }
+
+    // wts and Codeg share the installed helper, including submodule layout
+    // and session binding. Never reimplement those rules in the task engine.
+    if let Some(helper) = worktree_helper() {
+        let mut cmd = crate::process::tokio_command("python3");
+        cmd.arg(&helper).args([
+            "add",
+            "--repo",
+            &path,
+            "--branch",
+            &branch_name,
+            "--path",
+            &worktree_path,
+            "--no-open-workspace",
+            "--json",
+        ]);
+        // Preserve the interactive API's HEAD default. Task setup passes a
+        // fetched, pinned SHA explicitly.
+        cmd.args(["--base", base.as_deref().unwrap_or("HEAD")]);
+        let output = cmd
+            .current_dir(&path)
+            .output()
+            .await
+            .map_err(AppCommandError::io)?;
+        if !output.status.success() {
+            return Err(git_command_error("wtree.py add", &output.stderr));
+        }
+        // Validate the binding from inside the newly created workspace before
+        // the task can run any project init command or launch an agent there.
+        let checked = crate::process::tokio_command("python3")
+            .arg(&helper)
+            .args(["session-check", "--expected", &worktree_path])
+            .current_dir(&worktree_path)
+            .output()
+            .await
+            .map_err(AppCommandError::io)?;
+        if !checked.status.success() {
+            return Err(git_command_error("wtree.py session-check", &checked.stderr));
+        }
+        return Ok(());
+    }
+    if Path::new(&path).join(".gitmodules").is_file() {
+        return Err(AppCommandError::invalid_input(
+            "Install the git-worktree-submodule skill before creating worktrees for a repository with submodules",
+        ));
     }
 
     // 执行 git worktree add -b <branch> <path> [<base>]
