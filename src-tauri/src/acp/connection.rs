@@ -1070,14 +1070,15 @@ fn codex_config_with_thread_unload_delay(current: Option<&str>) -> Option<String
 /// Seed the adapter before session/new or session/resume. Replaying ACP
 /// selectors after establishment is too late: resume has already compared the
 /// saved model with the user's default and emitted a misleading warning.
-fn codex_launch_preferences(
+fn codex_launch_env(
     agent_type: AgentType,
-    runtime_env: &mut BTreeMap<String, String>,
+    runtime_env: &BTreeMap<String, String>,
     preferences: &BTreeMap<String, String>,
     inherited_config: Option<&str>,
-) {
+) -> BTreeMap<String, String> {
+    let mut runtime_env = runtime_env.clone();
     if agent_type != AgentType::Codex {
-        return;
+        return runtime_env;
     }
     let selected: Vec<_> = [
         ("model", "model"),
@@ -1092,7 +1093,7 @@ fn codex_launch_preferences(
     })
     .collect();
     if selected.is_empty() {
-        return;
+        return runtime_env;
     }
     let current = runtime_env
         .get(CODEX_CONFIG_ENV)
@@ -1103,7 +1104,7 @@ fn codex_launch_preferences(
         Some(text) => match serde_json::from_str::<serde_json::Value>(text) {
             Ok(serde_json::Value::Object(config)) => config,
             // Preserve invalid user configuration for the adapter to diagnose.
-            _ => return,
+            _ => return runtime_env,
         },
     };
     for (key, value) in selected {
@@ -1113,6 +1114,7 @@ fn codex_launch_preferences(
         CODEX_CONFIG_ENV.to_string(),
         serde_json::Value::Object(config).to_string(),
     );
+    runtime_env
 }
 
 /// Codex-only launch policy: force codex-acp's MCP name-conflict de-duplication
@@ -2793,13 +2795,6 @@ pub async fn spawn_agent_connection(
     terminal_shell_config: TerminalShellRuntimeConfig,
     cli_root: Option<crate::cli_run::RootSeed>,
 ) -> Result<tokio::sync::oneshot::Receiver<()>, AcpError> {
-    let mut runtime_env = runtime_env;
-    codex_launch_preferences(
-        agent_type,
-        &mut runtime_env,
-        &preferred_config_values,
-        std::env::var(CODEX_CONFIG_ENV).ok().as_deref(),
-    );
     // Use the same cwd for launch settings, the subprocess and session/new.
     let launch_cwd = resolve_working_dir(working_dir.as_deref());
     // Create the authoritative session state up front. Subsequent emit_with_state
@@ -2901,9 +2896,17 @@ pub async fn spawn_agent_connection(
     // directory could not be created) means the child inherits the ambient
     // temp dir exactly as it did before.
     let scratch = crate::acp::scratch_dir::create(agent_type);
-    let (agent, prompt_usage_mode) = match build_agent(
+    // Session selections affect only the adapter process, not the shared
+    // config fingerprint that settings saves recompute without selections.
+    let launch_runtime_env = codex_launch_env(
         agent_type,
         &runtime_env,
+        &preferred_config_values,
+        std::env::var(CODEX_CONFIG_ENV).ok().as_deref(),
+    );
+    let (agent, prompt_usage_mode) = match build_agent(
+        agent_type,
+        &launch_runtime_env,
         &launch_cwd,
         &stderr_tail,
         scratch.as_ref().map(|s| s.path()),
@@ -2997,9 +3000,9 @@ pub async fn spawn_agent_connection(
     let state_clone = Arc::clone(&session_state);
 
     // Canonical config fingerprint of what this process is launching with.
-    // Derived from the same `runtime_env` we hand the agent (minus per-launch
-    // volatile keys) plus the agent's native config file content, so a later
-    // settings save can be compared against it to detect a stale running session.
+    // Derived from shared settings (minus per-launch volatile keys) plus the
+    // native config file. Session model selections live only in launch_runtime_env,
+    // so a no-op settings save compares the same inputs and stays fresh.
     let config_fingerprint =
         crate::commands::acp::fingerprint_config(agent_type, &runtime_env);
 
@@ -32364,8 +32367,15 @@ mod tests {
             ("mode".into(), "full-access".into()),
         ]);
         let inherited = r#"{"model":"gpt-6.1-sol","hooks":{"PreToolUse":[]}}"#;
-        let mut env = BTreeMap::new();
-        codex_launch_preferences(AgentType::Codex, &mut env, &prefs, Some(inherited));
+        let configured_env = BTreeMap::from([("CODEX_CONFIG".into(), inherited.into())]);
+        let fingerprint = crate::commands::acp::fingerprint_config(AgentType::Codex, &configured_env);
+        let mut env = codex_launch_env(AgentType::Codex, &configured_env, &prefs, None);
+        assert_eq!(
+            crate::commands::acp::fingerprint_config(AgentType::Codex, &configured_env),
+            fingerprint,
+            "session selections must not mark unchanged settings as stale"
+        );
+        assert_eq!(configured_env[CODEX_CONFIG_ENV], inherited);
         let config: serde_json::Value = serde_json::from_str(&env[CODEX_CONFIG_ENV]).unwrap();
         assert_eq!(
             config,
@@ -32376,7 +32386,7 @@ mod tests {
         );
         // Runtime overrides inherit nothing from Codeg's ambient config.
         env.insert(CODEX_CONFIG_ENV.into(), r#"{"service_tier":"fast"}"#.into());
-        codex_launch_preferences(AgentType::Codex, &mut env, &prefs, Some(inherited));
+        env = codex_launch_env(AgentType::Codex, &env, &prefs, Some(inherited));
         let config: serde_json::Value = serde_json::from_str(&env[CODEX_CONFIG_ENV]).unwrap();
         assert_eq!(
             config,
@@ -32398,25 +32408,25 @@ mod tests {
         let prefs = BTreeMap::from([("model".into(), "gpt-6.2-astra".into())]);
         for agent in [AgentType::ClaudeCode, AgentType::Grok] {
             let mut env = BTreeMap::new();
-            codex_launch_preferences(agent, &mut env, &prefs, None);
+            env = codex_launch_env(agent, &env, &prefs, None);
             assert_eq!(env, BTreeMap::new());
         }
         let original = BTreeMap::from([(CODEX_CONFIG_ENV.into(), "not json".into())]);
         let mut env = original.clone();
-        codex_launch_preferences(AgentType::Codex, &mut env, &prefs, None);
+        env = codex_launch_env(AgentType::Codex, &env, &prefs, None);
         assert_eq!(env, original);
         for prefs in [
             BTreeMap::new(),
             BTreeMap::from([("model".into(), " ".into())]),
         ] {
             let mut env = BTreeMap::new();
-            codex_launch_preferences(AgentType::Codex, &mut env, &prefs, Some("{}"));
+            env = codex_launch_env(AgentType::Codex, &env, &prefs, Some("{}"));
             assert_eq!(env, BTreeMap::new());
         }
         let mut env = BTreeMap::new();
-        codex_launch_preferences(
+        env = codex_launch_env(
             AgentType::Codex,
-            &mut env,
+            &env,
             &prefs,
             Some(r#"{"model_reasoning_effort":"low"}"#),
         );
