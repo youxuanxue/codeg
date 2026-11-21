@@ -2708,6 +2708,32 @@ impl ConnectionManager {
         }
     }
 
+    /// A task must release its CLI's session lock before it can be resumed.
+    /// Let the connection finish its process-tree cleanup, then use the existing
+    /// shutdown backstop before publishing the task as settled.
+    pub async fn disconnect_and_wait(&self, conn_id: &str) -> Result<(), AcpError> {
+        let pid = self
+            .connections
+            .lock()
+            .await
+            .get(conn_id)
+            .map(|c| c.child_pid.clone());
+        self.disconnect(conn_id).await?;
+        if let Some(pid) = pid {
+            let gone = tokio::task::spawn_blocking(move || {
+                wait_for_reap(&pid, Duration::from_secs(3)) || kill_tree_and_wait(&pid)
+            })
+            .await
+            .map_err(|e| AcpError::protocol(e.to_string()))?;
+            if !gone {
+                return Err(AcpError::protocol(
+                    "agent process did not exit after disconnect",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Remember a connection's child until it is provably finished. Call while
     /// holding the connections lock, immediately after removing the entry.
     async fn park_draining(&self, conn: &AgentConnection) {
@@ -5080,6 +5106,44 @@ mod tests {
         assert_eq!(
             mgr.live_or_draining_agent_names().await,
             vec!["Claude Code".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn task_disconnect_waits_for_the_previous_process_to_exit() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mgr = ConnectionManager::new();
+        mgr.insert_test_connection("task-exit", AgentType::Codex, None, EventEmitter::Noop)
+            .await;
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let cell = mgr
+            .connections
+            .lock()
+            .await
+            .get("task-exit")
+            .unwrap()
+            .child_pid
+            .clone();
+        cell.store(child.id().unwrap(), SeqCst);
+        let exited = cell.clone();
+        let reap = tokio::spawn(async move {
+            let status = child.wait().await.unwrap();
+            exited.store(0, SeqCst);
+            status
+        });
+        mgr.disconnect_and_wait("task-exit").await.unwrap();
+        assert_eq!(
+            cell.load(SeqCst),
+            0,
+            "the old session owner must be reaped before return"
+        );
+        assert!(
+            !reap.await.unwrap().success(),
+            "the live child was terminated"
         );
     }
 

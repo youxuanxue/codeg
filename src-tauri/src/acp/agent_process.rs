@@ -330,8 +330,8 @@ impl AcpAgent {
     ///
     /// It deliberately does NOT fire merely because the connection ended. When
     /// the protocol future finishes first, the internal `ChildGuard` kills the
-    /// tree on drop, but `kill_tree` only signals (SIGTERM on Unix) and does
-    /// not wait — the process can still be alive, so a host that cleared its
+    /// tree on drop, but `kill_tree` only signals and does not wait — the
+    /// process is not yet reaped, so a host that cleared its
     /// pid record there would disarm its own shutdown backstop.
     ///
     /// The callback fires only where the pid genuinely stops being ours: after
@@ -507,9 +507,19 @@ impl Drop for ChildGuard {
             return;
         };
 
-        let _ = kill_tree::blocking::kill_tree(pid);
+        // The protocol is finished. A SIGTERM-resistant descendant (Codex's
+        // app-server) can outlive its launcher and keep the session writer lock.
+        // Terminate the entire snapshot before the launcher can be reaped and
+        // those descendants disappear from its process tree.
+        let config = kill_tree::Config {
+            signal: "SIGKILL".into(),
+            ..Default::default()
+        };
+        if let Err(error) = kill_tree::blocking::kill_tree_with_config(pid, &config) {
+            tracing::warn!("[ACP] failed to terminate agent process tree {pid}: {error}");
+        }
 
-        // `kill_tree` only signals (SIGTERM on Unix) and does not wait, so the
+        // `kill_tree` only signals and does not wait, so the
         // process may well outlive this call. Keep OWNING the child until it is
         // really reaped, and report the exit from there.
         //
@@ -1089,92 +1099,75 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    /// The case that makes the whole design necessary: a child that ignores the
-    /// kill signal is STILL RUNNING after `drop`. Its pid must stay published so
-    /// a host's shutdown backstop still sweeps it — reporting an exit here would
-    /// disarm that backstop and leave a real orphan behind.
+    /// The adapter can exit before its SIGTERM-resistant app-server. Every
+    /// inheritor of a writer lock must stop before the task can resume it.
     #[cfg(unix)]
-    #[test]
-    fn a_child_that_survives_the_kill_keeps_its_pid_published() {
+    #[tokio::test]
+    async fn dropping_the_guard_releases_a_descendant_writer_lock() {
+        use std::os::fd::AsRawFd;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncBufReadExt, BufReader};
 
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("writer.lock");
+        let writer = std::fs::File::create(&lock_path).unwrap();
+        assert_eq!(unsafe { libc::flock(writer.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; /bin/sh -c 'trap \"\" TERM; echo ready >&2; while :; do sleep 1; done' & wait"])
+            .stdout(writer)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            BufReader::new(child.stderr.take().unwrap()).read_line(&mut ready),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let probe = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert_ne!(
+            unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let pid = child.id().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        // The shell announces itself only AFTER installing the trap. Killing it
-        // before that point would hit the default disposition and the test would
-        // "fail" for a reason it isn't testing.
-        let ready = std::env::temp_dir().join(format!(
-            "codeg-agent-process-trap-ready-{}-{:p}",
-            std::process::id(),
-            &calls
-        ));
-        let _ = std::fs::remove_file(&ready);
-
-        rt.block_on(async {
-            // Ignores SIGTERM and respawns the `sleep` that `kill_tree` reaches,
-            // so the whole tree outlives the guard's kill.
-            let child = tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    &format!(
-                        "trap '' TERM; echo ready > '{}'; while true; do sleep 1; done",
-                        ready.display()
-                    ),
-                ])
-                .spawn()
-                .expect("spawn sh");
-            let pid = child.id().expect("child has a pid").to_string();
-            let guard = ChildGuard {
-                child: Some(child),
-                exit_callback: Some(counting_callback(&calls)),
-            };
-
-            let mut trapped = false;
-            for _ in 0..200 {
-                if ready.exists() {
-                    trapped = true;
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            assert!(trapped, "the shell never installed its SIGTERM trap");
-
-            drop(guard);
-
-            // Well past the signal it ignored. `kill -0` probes for existence
-            // without sending anything (no `libc` dependency in this crate).
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            let alive = std::process::Command::new("kill")
-                .args(["-0", &pid])
-                .status()
-                .expect("run kill -0")
-                .success();
-            assert!(
-                alive,
-                "test setup is wrong — the child was supposed to survive SIGTERM"
-            );
-            assert_eq!(
-                calls.load(Ordering::SeqCst),
-                0,
-                "a still-running child must keep its pid published"
-            );
-
-            // And once it really dies, the exit is reported — the reaper is
-            // armed the whole time, not abandoned.
-            let _ = std::process::Command::new("kill")
-                .args(["-9", &pid])
-                .status();
-            let mut reported = false;
-            for _ in 0..200 {
-                if calls.load(Ordering::SeqCst) > 0 {
-                    reported = true;
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            assert!(reported, "the reaper never observed the child's death");
+        drop(ChildGuard {
+            child: Some(child),
+            exit_callback: Some(counting_callback(&calls)),
         });
-        let _ = std::fs::remove_file(&ready);
+        let released = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0
+                    && calls.load(Ordering::SeqCst) == 1
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !released {
+            // Clean up this fixture even when exercising the broken teardown.
+            let _ = kill_tree::blocking::kill_tree_with_config(
+                pid,
+                &kill_tree::Config {
+                    signal: "SIGKILL".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(
+            released,
+            "the app-server descendant still owns the session writer lock"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

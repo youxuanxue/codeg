@@ -726,7 +726,7 @@ mod against_a_forge {
     }
 
     #[tokio::test]
-    async fn unchanged_sticky_issues_recur_after_review_but_not_while_pending_or_running() {
+    async fn unchanged_sticky_issues_reuse_unfinished_tasks_and_only_recreate_after_done() {
         use crate::db::entities::work_task;
         use crate::models::WorkTaskStatus;
         use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, Set};
@@ -737,7 +737,15 @@ mod against_a_forge {
         let data = data.to_string_lossy().to_string();
         temp_env::async_with_vars([("CODEG_DATA_DIR", Some(data.as_str()))], async move {
             let (p, folder, seen) = on_forge(tmp.path(), Pulls::Sticky).await;
-            save_auto(&p, Some(folder), bug_rules()).await;
+            save_auto(
+                &p,
+                Some(folder),
+                ForgeAutoSettings {
+                    auto_start: true,
+                    ..bug_rules()
+                },
+            )
+            .await;
             let first = p.scan(folder, Trigger::Manual).await.unwrap();
             assert!(first.failed.is_empty(), "{first:?}");
             assert_eq!(
@@ -751,14 +759,14 @@ mod against_a_forge {
                 .find(|t| t.number == 2)
                 .unwrap()
                 .task_id;
-            let mut sticky: Vec<i32> = first
+            let sticky: Vec<i32> = first
                 .created
                 .iter()
                 .filter(|t| t.number != 2)
                 .map(|t| t.task_id)
                 .collect();
-            // Ordinary history survives deletion, while sticky reviews are history
-            // for the next cycle. These rows have never changed since year 2000.
+            // Ordinary history survives deletion; sticky tasks are continued.
+            // These issues have never changed since year 2000.
             work_task_service::soft_delete(&p.db.conn, ordinary, WorkTaskStatus::Todo)
                 .await
                 .unwrap();
@@ -767,7 +775,9 @@ mod against_a_forge {
                 WorkTaskStatus::Queued,
                 WorkTaskStatus::Running,
                 WorkTaskStatus::Review,
+                WorkTaskStatus::Failed,
                 WorkTaskStatus::Review,
+                WorkTaskStatus::Done,
             ] {
                 for id in &sticky {
                     let mut row = work_task::Entity::find_by_id(*id)
@@ -781,13 +791,28 @@ mod against_a_forge {
                 }
                 let scan = p.scan(folder, Trigger::Manual).await.unwrap();
                 assert!(scan.error.is_none() && scan.failed.is_empty(), "{scan:?}");
-                if status == WorkTaskStatus::Review {
+                if matches!(status, WorkTaskStatus::Review | WorkTaskStatus::Failed) {
+                    assert!(scan.created.is_empty(), "{scan:?}");
+                    assert_eq!(
+                        scan.reused.iter().map(|t| t.task_id).collect::<Vec<_>>(),
+                        sticky
+                    );
+                    for id in &sticky {
+                        assert_eq!(
+                            work_task_service::get_model(&p.db.conn, *id)
+                                .await
+                                .unwrap()
+                                .status,
+                            WorkTaskStatus::Queued
+                        );
+                    }
+                } else if status == WorkTaskStatus::Done {
                     assert_eq!(
                         scan.created.iter().map(|t| t.number).collect::<Vec<_>>(),
-                        vec![1, 3, 4],
-                        "{scan:?}"
+                        vec![1, 3, 4]
                     );
-                    sticky = scan.created.iter().map(|t| t.task_id).collect();
+                    let next: Vec<_> = scan.created.iter().map(|t| t.task_id).collect();
+                    assert!(next.iter().all(|id| !sticky.contains(id)));
                 } else {
                     assert!(scan.created.is_empty(), "{status:?}: {scan:?}");
                 }

@@ -735,6 +735,15 @@ function ScanSummary({
           })}
         </span>
       ) : null}
+      {(report.reused?.length ?? 0) > 0 ? (
+        <span>
+          {t("autoStatusReused", {
+            items: (report.reused ?? [])
+              .map((item) => `#${item.number} → ${item.task_id}`)
+              .join(", "),
+          })}
+        </span>
+      ) : null}
       {skipped.length > 0 ? (
         <span>{t("autoStatusSkipped", { list: skipped.join(" · ") })}</span>
       ) : null}

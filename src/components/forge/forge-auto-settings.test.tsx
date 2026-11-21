@@ -290,6 +290,31 @@ describe("ForgeAutoActivity", () => {
     expect(screen.getByText(/Last webhook delivery:/)).toBeInTheDocument()
   })
 
+  it("shows continued task ids separately from newly created tasks", async () => {
+    forgeAutoStatus.mockResolvedValue(
+      status({
+        last_scan: report({
+          created: [],
+          reused: [
+            {
+              number: 2899,
+              is_pr: false,
+              title: "Tracking",
+              task_id: 52,
+              started: true,
+              start_error: null,
+            },
+          ],
+        }),
+      })
+    )
+    mountActivity()
+    expect(
+      await screen.findByText("Continued tasks: #2899 → 52")
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/New tasks:/)).not.toBeInTheDocument()
+  })
+
   /** A scan that stopped — no account, a dead token — is the very answer the
    *  user opened the dialog for, so it is said here, not in a toast. */
   it("says in place why a scan stopped", async () => {

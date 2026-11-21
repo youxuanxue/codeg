@@ -707,9 +707,17 @@ fn resolve_writeback(asked: Option<bool>) -> bool {
 #[derive(Debug, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum ForgeCreateResult {
-    Created { task: WorkTaskInfo },
-    Duplicate { existing: WorkTaskInfo },
-    FolderMismatch { folder_remote: Option<ForgeRemote> },
+    Created {
+        task: WorkTaskInfo,
+        #[serde(skip)]
+        reused: bool,
+    },
+    Duplicate {
+        existing: WorkTaskInfo,
+    },
+    FolderMismatch {
+        folder_remote: Option<ForgeRemote>,
+    },
 }
 
 /// [`ForgeCreateResult`] for several issues: a dedup hit names EVERY issue a
@@ -1227,7 +1235,10 @@ pub enum ForgeTaskOrigin {
     /// Auto-processing, and what woke it.
     Auto(crate::forge::auto::Trigger),
     /// An open sticky issue may recur once its agent has finished.
-    AutoSticky(crate::forge::auto::Trigger),
+    AutoSticky {
+        trigger: crate::forge::auto::Trigger,
+        auto_start: bool,
+    },
 }
 
 /// The scenario an automatic task of this kind runs, by wire name: the one
@@ -1443,39 +1454,47 @@ pub async fn create_forge_task(
 
     let auto_trigger = match origin {
         ForgeTaskOrigin::User => None,
-        ForgeTaskOrigin::Auto(trigger) | ForgeTaskOrigin::AutoSticky(trigger) => {
+        ForgeTaskOrigin::Auto(trigger) | ForgeTaskOrigin::AutoSticky { trigger, .. } => {
             Some(trigger.as_str())
         }
     };
-    match work_task_service::create_from_forge_by(
+    let (task, reused) = match work_task_service::create_from_forge_by(
         &db.conn,
         task_draft,
         source_row,
         draft.force,
         auto_trigger,
-        matches!(origin, ForgeTaskOrigin::AutoSticky(_)),
+        match origin {
+            ForgeTaskOrigin::AutoSticky { auto_start, .. } => Some(auto_start),
+            _ => None,
+        },
     )
     .await?
     {
-        ForgeCreateOutcome::Created(task) => {
-            emit_event(
-                emitter,
-                WORK_TASK_CHANGED_EVENT,
-                WorkTaskChange::Upsert { id: task.id },
-            );
-            crate::commands::work_task::nudge_pump(task.folder_id);
-            Ok(ForgeCreateResult::Created { task: *task })
-        }
+        ForgeCreateOutcome::Created(task) => (task, false),
+        ForgeCreateOutcome::Reused(task) => (task, true),
         // One item, so one entry: the live task already handling it.
-        ForgeCreateOutcome::Duplicate(conflicts) => match conflicts.into_iter().next() {
-            Some(conflict) => Ok(ForgeCreateResult::Duplicate {
-                existing: conflict.existing,
-            }),
-            None => Err(AppCommandError::database_error(
-                "the task board reported a duplicate without naming it",
-            )),
-        },
-    }
+        ForgeCreateOutcome::Duplicate(conflicts) => {
+            return match conflicts.into_iter().next() {
+                Some(conflict) => Ok(ForgeCreateResult::Duplicate {
+                    existing: conflict.existing,
+                }),
+                None => Err(AppCommandError::database_error(
+                    "the task board reported a duplicate without naming it",
+                )),
+            }
+        }
+    };
+    emit_event(
+        emitter,
+        WORK_TASK_CHANGED_EVENT,
+        WorkTaskChange::Upsert { id: task.id },
+    );
+    crate::commands::work_task::nudge_pump(task.folder_id);
+    Ok(ForgeCreateResult::Created {
+        task: *task,
+        reused,
+    })
 }
 
 /// Where a trigger's task will run and whom it will speak as — settled by
@@ -1743,7 +1762,7 @@ pub async fn create_forge_issues_task(
     match work_task_service::create_from_forge(&db.conn, task_draft, source_row, draft.force)
         .await?
     {
-        ForgeCreateOutcome::Created(task) => {
+        ForgeCreateOutcome::Created(task) | ForgeCreateOutcome::Reused(task) => {
             emit_event(
                 emitter,
                 WORK_TASK_CHANGED_EVENT,

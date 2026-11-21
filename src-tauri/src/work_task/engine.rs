@@ -1656,6 +1656,22 @@ impl TaskEngine {
                 Ok(())
             }
             Err(e) => {
+                // The task is already running, but no prompt was accepted.
+                // A reused conversation can still say pending_review from the
+                // previous round; do not let recovery treat that as success.
+                if work_task_service::fail(
+                    &self.db.conn,
+                    task_id,
+                    &[WorkTaskStatus::Running, WorkTaskStatus::AwaitingInput],
+                    Some(run_seq),
+                    "setup_error",
+                    Some(e.to_string()),
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    self.emit_upsert(task_id);
+                }
                 self.forget_connection(&conn_id).await;
                 let _ = self.manager.disconnect(&conn_id).await;
                 if !resumed {
@@ -3194,9 +3210,11 @@ impl TaskEngine {
         // Taken before retire, which drops the same entry.
         let signal = self.turn_signals.lock().await.remove(conn_id);
         self.retire_connection(conn_id, task_id).await;
-        let _ = self.manager.disconnect(conn_id).await;
+        let teardown = self.manager.disconnect_and_wait(conn_id).await;
 
-        let task = work_task_service::get_model(&self.db.conn, task_id).await.ok();
+        let task = work_task_service::get_model(&self.db.conn, task_id)
+            .await
+            .ok();
 
         // A merge generation settles from git truth whatever the stop reason —
         // the agent may have landed the merge and then errored or been stopped.
@@ -3211,6 +3229,28 @@ impl TaskEngine {
             // queued (or the auto-merge train) can land now.
             self.spawn_merge_pump(t.folder_id);
             return;
+        }
+
+        if let Err(error) = teardown {
+            if !matches!(error, crate::acp::error::AcpError::ConnectionNotFound(_)) {
+                let changed = work_task_service::fail(
+                    &self.db.conn,
+                    task_id,
+                    &[WorkTaskStatus::Running, WorkTaskStatus::AwaitingInput],
+                    Some(run_seq),
+                    "agent_teardown",
+                    Some(error.to_string()),
+                )
+                .await
+                .unwrap_or(false);
+                if changed {
+                    self.emit_upsert(task_id);
+                    if let Some(task) = task {
+                        self.pump_folder(task.folder_id).await;
+                    }
+                }
+                return;
+            }
         }
 
         let changed = match stop_reason {
@@ -7437,12 +7477,28 @@ async fn compose_prompt(
             push_replay(&mut blocks, &scan, resumed, task.id);
         }
         LaunchMode::Retry => {
+            let scan = instruction_scan(conn, task.id).await;
             blocks.push(PromptInputBlock::Text {
-                text: "The previous run of this task was interrupted. Continue working in \
-                       this worktree and complete the task."
-                    .to_string(),
+                text: if scan.forge_scan {
+                    "Forge has scanned this open issue again. Continue the SAME task and \
+                     preserve its existing work, commits and PR. First check the latest issue, \
+                     origin/main and any existing PR; do not repeat work already completed \
+                     or awaiting review. Do not reset this worktree. Follow the refreshed \
+                     task instructions below, including its current labels and standing rules."
+                } else {
+                    "The previous run of this task was interrupted. Continue working in \
+                     this worktree and complete the task."
+                }
+                .to_string(),
             });
-            if !resumed {
+            if scan.forge_scan {
+                if let Some(summary) = &task.result_summary {
+                    blocks.push(PromptInputBlock::Text {
+                        text: format!("Previous run summary (historical context, verify before relying on it):\n{summary}"),
+                    });
+                }
+            }
+            if !resumed || scan.forge_scan {
                 blocks.push(PromptInputBlock::Text {
                     text: "The original task follows for reference:".to_string(),
                 });
@@ -7451,7 +7507,6 @@ async fn compose_prompt(
             // Replay whatever instruction the interrupted generation still
             // owed the user, framed the way they meant it — an unanswered
             // question must not come back as a work order.
-            let scan = instruction_scan(conn, task.id).await;
             // A retry stands in for whichever turn was interrupted, and the
             // licence follows THAT turn — `interrupted`, not the newest note:
             // a retry/requeue note refines the turn it interrupts (a hint, a
@@ -7823,6 +7878,7 @@ struct Outstanding {
 /// newer INSTRUCTION, but the turn underneath is still that follow-up — a
 /// note refines the turn it interrupts, it does not change its kind.
 struct InstructionScan {
+    forge_scan: bool,
     outstanding: Option<Outstanding>,
     /// The unsettled `return` intent beneath any retry/requeue notes; `None`
     /// when the generation was (re)doing the task's original order.
@@ -7858,6 +7914,7 @@ async fn instruction_scan(
     .await
     .unwrap_or_default();
     let mut scan = InstructionScan {
+        forge_scan: false,
         outstanding: None,
         interrupted: None,
         interrupted_instruction: None,
@@ -7886,6 +7943,12 @@ async fn instruction_scan(
                     break;
                 };
                 match action {
+                    "forge_scan" => {
+                        scan.forge_scan = true;
+                        // A failed follow-up may still owe the user's feedback
+                        // or read-only question. Only a settled review below
+                        // consumes that instruction.
+                    }
                     "return" => {
                         let intent = FollowUpIntent::from_wire(
                             payload.get("intent").and_then(|v| v.as_str()),
@@ -9033,6 +9096,71 @@ mod tests {
         task_id: i32,
     ) -> Option<Outstanding> {
         instruction_scan(conn, task_id).await.outstanding
+    }
+
+    #[tokio::test]
+    async fn sticky_scan_replays_refreshed_order_even_when_session_resumes() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let id = seeded_task(&db.conn).await;
+        settled_into_review(&db.conn, id).await;
+        user_action(
+            &db.conn,
+            id,
+            serde_json::json!({ "action": "forge_scan", "run_seq": 2 }),
+        )
+        .await;
+        let mut task = task_row();
+        task.id = id;
+        task.result_summary = Some("previous fix is on the existing branch".into());
+        let mut cfg = task_config();
+        cfg.prompt_blocks = vec![
+            serde_json::json!({ "type": "text", "text": "REFRESHED: upgrade clients first, then fingerprint-all; current drift labels" }),
+        ];
+        cfg.deliverable = Some(DELIVERABLE_REPORT.into());
+        for resumed in [true, false] {
+            let blocks = compose_prompt(
+                &cfg,
+                &task,
+                &LaunchMode::Retry,
+                &WorkTaskFolderSettings::default(),
+                resumed,
+                &db.conn,
+            )
+            .await
+            .unwrap();
+            let text = texts(&blocks).join("\n");
+            assert!(text.contains("REFRESHED: upgrade clients first"), "{text}");
+            assert!(text.contains("preserve its existing work, commits and PR"));
+            assert!(text.contains("previous fix is on the existing branch"));
+            assert!(text.contains("This turn delivers a report"));
+            assert!(!text.contains("Commit to the current branch as you like"));
+            assert!(!text.contains("previous run of this task was interrupted"));
+        }
+        // A failed user question remains read-only when a scan retries it.
+        user_action(&db.conn, id, serde_json::json!({ "action": "return", "intent": "question", "feedback": "Explain the previous fix" })).await;
+        user_action(&db.conn, id, serde_json::json!({ "action": "forge_scan" })).await;
+        let blocks = compose_prompt(
+            &cfg,
+            &task,
+            &LaunchMode::Retry,
+            &WorkTaskFolderSettings::default(),
+            true,
+            &db.conn,
+        )
+        .await
+        .unwrap();
+        let text = texts(&blocks).join("\n");
+        assert!(text.contains("Explain the previous fix"));
+        assert!(text.contains("This turn is a question"));
+        // A settled scan must not change the semantics of a later manual retry.
+        settled_into_review(&db.conn, id).await;
+        user_action(
+            &db.conn,
+            id,
+            serde_json::json!({ "action": "retry", "note": "retry manually" }),
+        )
+        .await;
+        assert!(!instruction_scan(&db.conn, id).await.forge_scan);
     }
 
     /// Each scenario reframes the SAME user text — that is the whole point of
