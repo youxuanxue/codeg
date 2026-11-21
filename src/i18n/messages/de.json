@@ -1080,7 +1080,10 @@
       "saveRawConfig": "Datei speichern"
     },
     "antigravity": {
-      "configDescription": "Antigravity needs an authentication method before it can start a session. The choice is written to auth.type in $GEMINI_HOME/antigravity-acp/settings.json, which is the only place the ACP server looks — without it every new session fails with \"Authentication required\". Model and session mode are not here: Antigravity reports them over ACP, so the composer's own selectors own them per session.",
+      "nativeLoginHint": "For Google sign-in, run this command in a terminal on the Codeg host, then reopen the session. With a custom GEMINI_HOME, add the same --gemini-dir path.",
+      "baseUrlLabel": "Custom API endpoint (optional)",
+      "baseUrlHint": "Root URL of a Gemini-compatible service such as TokenKey. Leave empty for Google. The API key is passed only to the agent process, never written to native settings.",
+      "configDescription": "Uses your installed agy acp and shares the native CLI settings and account. Select Gemini API key for TokenKey or another Gemini-compatible endpoint. Model and permission mode are managed per session.",
       "methodLabel": "Authentication method",
       "methods": {
         "oauth-personal": "Sign in with Google",
@@ -1089,9 +1092,9 @@
         "agent-platform": "Gemini Enterprise Agent Platform"
       },
       "methodHints": {
-        "oauth-personal": "Your Google account, on any Antigravity plan including the free tier. The first new session opens a browser to finish signing in; the token is then cached and reused. Kein Browser auf diesem Rechner? Nutze die browserfreie Anmeldung unten.",
-        "oauth-business": "Your Gemini Enterprise account. Needs a GCP project and location, and the first new session opens a browser. Kein Browser auf diesem Rechner? Nutze die browserfreie Anmeldung unten.",
-        "gemini-api-key": "A key for the Gemini Developer API, passed to the agent as GEMINI_API_KEY.",
+        "oauth-personal": "Sign in with your Google account using agy acp --login on the Codeg host, then reopen the session.",
+        "oauth-business": "Use your Gemini Enterprise account with a GCP project and location. Complete native agy login on the Codeg host before reopening the session.",
+        "gemini-api-key": "Use a Gemini API key and an optional custom endpoint such as TokenKey. No Google sign-in is needed.",
         "agent-platform": "Formerly Vertex AI. Use an API key, or a project and location with Application Default Credentials (gcloud auth application-default login)."
       },
       "geminiApiKeyLabel": "Gemini API key",
@@ -1102,29 +1105,12 @@
       "missingGeminiApiKey": "Enter a Gemini API key, or pick a different authentication method — sessions will fail to start without it.",
       "missingAgentPlatformConfig": "Enter an API key, or both a project and a location — sessions will fail to start without one of the two.",
       "missingEnterpriseConfig": "Gemini Enterprise needs both a project and a location.",
-      "settingsFileHint": "Saved to auth.type in this file. Any other keys you put there are preserved.",
-      "syncSkipped": "Your choice was saved, but codeg could not write it to the ACP server's settings.json, so Antigravity will keep authenticating the way that file says. Set auth.type in it yourself, or move it aside and save again.",
+      "settingsFileHint": "Native CLI settings; Codeg syncs only modelProvider and project settings for the selected authentication method.",
+      "syncSkipped": "Your choice was saved, but native CLI settings could not be synchronized. Resolve the reason below and save again.",
       "save": "Save",
-      "headless": {
-        "title": "Ohne Browser auf diesem Rechner anmelden",
-        "description": "Antigravity führt die Google-Anmeldung selbst aus – auf dem Rechner, auf dem der Agent läuft. Fehlt dort ein Browser (codeg auf einem Server ohne Desktop), wartet die erste Sitzung fünf Minuten und schlägt dann fehl. Melde dich stattdessen hier an: Link auf einem beliebigen Gerät öffnen und die Zieladresse zurück einfügen.",
-        "start": "Anmeldelink holen",
-        "saveFirst": "Zuerst speichern – die Anmeldung nutzt die gespeicherten Einstellungen, nicht das oben Eingetippte.",
-        "step1": "1. Öffne diesen Link und melde dich bei Google an.",
-        "step2": "2. Dein Browser landet auf {redirectUri} und kann keine Verbindung herstellen – das ist so gewollt. Kopiere die vollständige Adresse aus der Adressleiste und füge sie hier ein.",
-        "copyLink": "Link kopieren",
-        "openLink": "In neuem Tab öffnen",
-        "complete": "Anmeldung abschließen",
-        "cancel": "Abbrechen",
-        "signedIn": "Angemeldet. Neue Sitzungen verwenden dieses Konto.",
-        "alreadySignedIn": "Antigravity hatte bereits ein gültiges Token und hat sich ohne Link angemeldet.",
-        "failed": "Die Anmeldung wurde nicht abgeschlossen.",
-        "startFailed": "Anmeldung konnte nicht gestartet werden",
-        "credentialHint": "Das Token liegt hier. Kopiere diese Datei auf weitere Rechner ohne Desktop, um sie ebenfalls anzumelden."
-      },
       "signOut": {
         "title": "Mit dem falschen Konto angemeldet?",
-        "description": "Antigravity speichert das angemeldete Google-Konto zwischen und verwendet es stillschweigend weiter, sodass eine erneute Anmeldung kein anderes Konto erreicht. Beim Abmelden werden die gespeicherten Anmeldedaten verworfen; laufende Antigravity-Sitzungen werden zuvor beendet, da sie sonst das alte Konto zurückschreiben würden.",
+        "description": "Signing out removes the Google credential shared with the native agy CLI. Codeg stops its running Antigravity sessions first. Use agy acp --login to choose another account.",
         "action": "Abmelden",
         "done": "Abgemeldet. Melde dich erneut an, um ein anderes Konto zu wählen.",
         "failed": "Abmelden fehlgeschlagen"

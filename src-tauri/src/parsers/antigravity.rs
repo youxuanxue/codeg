@@ -1,31 +1,11 @@
-//! Transcript reader for Google Antigravity's first-party ACP server
-//! (`agy_acp_server`).
+//! Transcript reader for native `agy acp` and the retired Python ACP server.
 //!
-//! LAYOUT. Everything hangs off the *Gemini home* — `$GEMINI_HOME` when set and
-//! non-empty, else `~/.gemini`. Unlike Gemini CLI's `GEMINI_CLI_HOME` (which
-//! names the PARENT and gets `.gemini` joined onto it), `GEMINI_HOME` names the
-//! `.gemini` directory itself, so setting it relocates the whole tree:
-//!
-//! ```text
-//! <home>/antigravity-acp/                 this server's private subtree
-//! ├── settings.json                       auth.type + gcp.{project,location}
-//! ├── acp_token.json, acp_business_token.json   OAuth tokens (never archived)
-//! ├── trusted_workspaces.json
-//! └── conversations/
-//!     ├── <session id>.db                 SQLite trajectory
-//!     └── <session id>.meta               sidecar JSON (cwd, mode_id, …)
-//! ```
-//!
-//! FORMAT. The `.db` is a plain SQLite file with a single `steps(idx,
-//! step_payload)` table; each payload is a serialized `gemini_coder.Step`
-//! protobuf. A brand-new session's DB is pre-created EMPTY (0 bytes) before the
-//! Go harness writes the schema, so "no such table: steps" is a normal state,
-//! not a corruption — it reads as an empty conversation.
-//!
-//! The `.meta` sidecar carries `cwd` (and `mode_id` / `allowed_tool_calls`) but
-//! NO title: the server synthesizes `Session <first 8 chars>` for its own
-//! `session/list`, which is not worth mirroring, so the title comes from the
-//! first user prompt like every other parser.
+//! Native trajectories live under `<GEMINI_HOME>/antigravity-cli/conversations`.
+//! The legacy `antigravity-acp/conversations` directory remains a read-only
+//! fallback so switching runtimes does not hide existing history. Both store
+//! serialized `gemini_coder.Step` messages in SQLite `steps.step_payload`.
+//! Legacy `.meta` sidecars provide cwd; missing metadata stays unknown rather
+//! than being attributed to the parser process's working directory.
 //!
 //! WHY A HAND-WRITTEN PROTO SUBSET. The real `Step` has ~130 fields, almost all
 //! of them one arm of a `oneof step` over Google-internal `exa.cortex_pb`
@@ -68,6 +48,7 @@ const TEXT_CAP: usize = 200_000;
 
 const SESSIONS_DIR_NAME: &str = "conversations";
 const ACP_SUBDIR: &str = "antigravity-acp";
+const CLI_SUBDIR: &str = "antigravity-cli";
 const METADATA_FILE_SUFFIX: &str = "meta";
 
 // ---------------------------------------------------------------------------
@@ -124,14 +105,7 @@ fn resolve_gemini_home_from(
     }
 }
 
-/// `<home>/antigravity-acp` — the ACP server's private directory. Also holds
-/// `settings.json` (see `acp::connection::sync_antigravity_settings_file`) and
-/// the OAuth token files.
-pub(crate) fn resolve_antigravity_acp_dir() -> PathBuf {
-    resolve_gemini_home().join(ACP_SUBDIR)
-}
-
-/// `<home>/antigravity-acp/conversations` — the session trajectories.
+/// Native `<home>/antigravity-cli/conversations` session trajectories.
 pub(crate) fn resolve_antigravity_sessions_dir() -> PathBuf {
     resolve_antigravity_sessions_dir_for_env(&AgentEnv::inherited())
 }
@@ -139,7 +113,7 @@ pub(crate) fn resolve_antigravity_sessions_dir() -> PathBuf {
 /// [`resolve_antigravity_sessions_dir`] for the server launched with `env`.
 pub(crate) fn resolve_antigravity_sessions_dir_for_env(env: &AgentEnv) -> PathBuf {
     resolve_gemini_home_for_env(env)
-        .join(ACP_SUBDIR)
+        .join(CLI_SUBDIR)
         .join(SESSIONS_DIR_NAME)
 }
 
@@ -540,6 +514,7 @@ impl ErrorDetails {
 
 pub struct AntigravityParser {
     base_dir: PathBuf,
+    legacy_dir: Option<PathBuf>,
 }
 
 impl AntigravityParser {
@@ -551,6 +526,11 @@ impl AntigravityParser {
     pub fn for_env(env: &AgentEnv) -> Self {
         Self {
             base_dir: resolve_antigravity_sessions_dir_for_env(env),
+            legacy_dir: Some(
+                resolve_gemini_home_for_env(env)
+                    .join(ACP_SUBDIR)
+                    .join(SESSIONS_DIR_NAME),
+            ),
         }
     }
 
@@ -558,16 +538,27 @@ impl AntigravityParser {
     /// (test fixtures).
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_base_dir(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+        Self {
+            base_dir,
+            legacy_dir: None,
+        }
     }
 
     fn db_path(&self, conversation_id: &str) -> PathBuf {
-        self.base_dir.join(format!("{conversation_id}.db"))
+        let native = self.base_dir.join(format!("{conversation_id}.db"));
+        if native.is_file() {
+            return native;
+        }
+        self.legacy_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("{conversation_id}.db")))
+            .filter(|path| path.is_file())
+            .unwrap_or(native)
     }
 
     fn meta_path(&self, conversation_id: &str) -> PathBuf {
-        self.base_dir
-            .join(format!("{conversation_id}.{METADATA_FILE_SUFFIX}"))
+        self.db_path(conversation_id)
+            .with_extension(METADATA_FILE_SUFFIX)
     }
 
     fn build(&self, conversation_id: &str) -> SessionParse {
@@ -605,11 +596,13 @@ impl Default for AntigravityParser {
 impl AgentParser for AntigravityParser {
     fn list_conversations(&self) -> Result<Vec<ConversationSummary>, ParseError> {
         let mut conversations = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&self.base_dir) else {
-            return Ok(conversations);
-        };
-
-        for entry in entries.flatten() {
+        let mut seen = std::collections::HashSet::new();
+        let dirs = std::iter::once(&self.base_dir).chain(self.legacy_dir.iter());
+        for entry in dirs
+            .filter_map(|dir| std::fs::read_dir(dir).ok())
+            .flatten()
+            .flatten()
+        {
             let path = entry.path();
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("db") {
                 continue;
@@ -618,6 +611,9 @@ impl AgentParser for AntigravityParser {
             else {
                 continue;
             };
+            if !seen.insert(conversation_id.clone()) {
+                continue;
+            }
             let parsed = self.build(&conversation_id);
             // A session whose DB is still the pre-created empty file (or which
             // was cleared) has no content to show — matching the other parsers'
@@ -800,7 +796,7 @@ impl PendingAssistant {
             duration_ms: None,
             model: self.model.take(),
             completed_at: self.last_ts,
-        agent_message_id: None,
+            agent_message_id: None,
         }
     }
 }
@@ -906,7 +902,7 @@ fn project_steps(steps: &[Step]) -> SessionParse {
                 duration_ms: None,
                 model: None,
                 completed_at: None,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             parsed.message_count = parsed.message_count.saturating_add(1);
             continue;
@@ -927,7 +923,10 @@ fn project_steps(steps: &[Step]) -> SessionParse {
         if let Some(usage) = step.metadata.as_ref().and_then(|m| m.model_usage.as_ref()) {
             // Per-step usage SUMS into the turn (cost accounting) while the
             // window gauge tracks only the latest step's input side.
-            pending.usage.input_tokens = pending.usage.input_tokens.saturating_add(usage.input_tokens);
+            pending.usage.input_tokens = pending
+                .usage
+                .input_tokens
+                .saturating_add(usage.input_tokens);
             pending.usage.output_tokens = pending
                 .usage
                 .output_tokens
@@ -1277,7 +1276,10 @@ fn step_outcome(step: &Step) -> Option<StepOutcome> {
         }
         let mut body = String::new();
         if !grep.query.is_empty() {
-            body.push_str(&format!("{} ({} results)\n", grep.query, grep.total_results));
+            body.push_str(&format!(
+                "{} ({} results)\n",
+                grep.query, grep.total_results
+            ));
         }
         body.push_str(&grep.raw_output);
         return Some(StepOutcome {
@@ -1405,7 +1407,9 @@ fn step_outcome(step: &Step) -> Option<StepOutcome> {
             serde_json::json!({ "answers": answers, "declined": false })
         };
         return Some(StepOutcome {
-            output: serde_json::to_string(&payload).ok().and_then(non_empty_capped),
+            output: serde_json::to_string(&payload)
+                .ok()
+                .and_then(non_empty_capped),
             is_error: status_error,
         });
     }
@@ -1506,6 +1510,51 @@ mod tests {
             resolve_gemini_home_from(Some("~/relocated".into()), Some(home)),
             PathBuf::from("/home/demo/relocated")
         );
+    }
+
+    #[test]
+    fn native_cli_fixture_and_legacy_history_remain_readable_after_migration() {
+        let root = tempfile::tempdir().unwrap();
+        let env = AgentEnv::with_overrides(&[("GEMINI_HOME", root.path().to_str().unwrap())]);
+        let parser = AntigravityParser::for_env(&env);
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/antigravity/native-api-key.json"
+        ))
+        .unwrap();
+        for (directory, id) in [
+            (&parser.base_dir, "native"),
+            (parser.legacy_dir.as_ref().unwrap(), "legacy"),
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+            let db = Connection::open(directory.join(format!("{id}.db"))).unwrap();
+            db.execute(
+                "CREATE TABLE steps(idx INTEGER PRIMARY KEY, step_payload BLOB)",
+                [],
+            )
+            .unwrap();
+            for (idx, value) in fixture["payloads"].as_array().unwrap().iter().enumerate() {
+                let hex = value.as_str().unwrap();
+                let payload: Vec<u8> = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                    .collect();
+                db.execute(
+                    "INSERT INTO steps VALUES (?1, ?2)",
+                    rusqlite::params![idx as i64, payload],
+                )
+                .unwrap();
+            }
+        }
+        let summaries = parser.list_conversations().unwrap();
+        assert_eq!(summaries.len(), 2);
+        for id in ["native", "legacy"] {
+            let detail = parser.get_conversation(id).unwrap();
+            assert_eq!(detail.turns.len(), 2);
+            assert!(matches!(detail.turns[0].role, TurnRole::User));
+            assert!(detail.summary.title.unwrap().contains("native-endpoint-ok"));
+            assert!(matches!(detail.turns[1].role, TurnRole::Assistant));
+            assert!(format!("{:?}", detail.turns[1].blocks).contains("native-endpoint-ok"));
+        }
     }
 
     #[test]
@@ -1892,10 +1941,7 @@ mod tests {
             conversation_history: "ignored too".into(),
         };
         let decoded = Step::decode(wide.encode_to_vec().as_slice()).expect("decode subset");
-        assert_eq!(
-            decoded.user_input.as_ref().unwrap().query,
-            "still readable"
-        );
+        assert_eq!(decoded.user_input.as_ref().unwrap().query, "still readable");
         assert!(decoded.metadata.unwrap().created_at.is_some());
     }
 
@@ -1990,7 +2036,10 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&truncate_str(&input, TOOL_INPUT_CAP)).expect("still valid JSON");
         assert_eq!(parsed["arguments"]["prompt"].as_str(), Some(&*long_prompt));
-        assert!(parsed.get("prompt").is_none(), "the derived copy is dropped");
+        assert!(
+            parsed.get("prompt").is_none(),
+            "the derived copy is dropped"
+        );
     }
 
     #[test]
@@ -2108,7 +2157,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            step_outcome(&genuine).expect("an outcome").output.as_deref(),
+            step_outcome(&genuine)
+                .expect("an outcome")
+                .output
+                .as_deref(),
             Some("from the impostor")
         );
     }
@@ -2196,7 +2248,7 @@ mod tests {
         assert_eq!(
             AntigravityParser::for_env(&env).base_dir,
             PathBuf::from("/relocated/agy")
-                .join("antigravity-acp")
+                .join("antigravity-cli")
                 .join("conversations")
         );
     }

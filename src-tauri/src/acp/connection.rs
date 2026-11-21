@@ -349,17 +349,10 @@ fn apply_grok_env_policy(merged: &mut Vec<(String, String)>, runtime_env: &BTree
     }
 }
 
-/// codeg-side knob recording which Antigravity auth method the settings panel
-/// chose. It is NOT read by the agent — the server takes its auth intent from
-/// `auth.type` in `antigravity-acp/settings.json` — so the launch path uses it
-/// twice: to decide which credential env vars may reach the process
-/// ([`apply_antigravity_env_policy`]) and to write that file
-/// ([`sync_antigravity_settings_file`]).
+/// Codeg's explicit native ACP authenticate method; never an upstream env knob.
 const ANTIGRAVITY_AUTH_METHOD_ENV: &str = "AGY_AUTH_METHOD";
 
-/// The four `auth.type` values Antigravity's ACP server accepts, canonical
-/// spellings only. `vertex-ai` is the pre-rebrand alias for `agent-platform`;
-/// the server still accepts it, but codeg never writes it.
+/// Canonical methods advertised by native agy ACP.
 const ANTIGRAVITY_AUTH_METHODS: &[&str] = &[
     "oauth-personal",
     "oauth-business",
@@ -373,6 +366,7 @@ const ANTIGRAVITY_AUTH_METHODS: &[&str] = &[
 /// silently take over.
 const ANTIGRAVITY_CREDENTIAL_ENV_VARS: &[&str] = &[
     "GEMINI_API_KEY",
+    "GOOGLE_GEMINI_BASE_URL",
     "GOOGLE_API_KEY",
     "GOOGLE_CLOUD_PROJECT",
     "GOOGLE_CLOUD_LOCATION",
@@ -381,9 +375,8 @@ const ANTIGRAVITY_CREDENTIAL_ENV_VARS: &[&str] = &[
 /// Which of [`ANTIGRAVITY_CREDENTIAL_ENV_VARS`] the given method consumes.
 fn antigravity_env_vars_for_method(method: &str) -> &'static [&'static str] {
     match method {
-        // `auth.type = gemini-api-key` reads the key from GEMINI_API_KEY and
-        // nothing else (the server's own auth_required message says so).
-        "gemini-api-key" => &["GEMINI_API_KEY"],
+        // Native Gemini provider reads its key and optional endpoint from env.
+        "gemini-api-key" => &["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"],
         // Agent Platform (formerly Vertex AI) takes GOOGLE_API_KEY, or a
         // project + location from the GOOGLE_CLOUD_* pair (with the
         // settings.json `gcp` block as a per-value fallback behind them).
@@ -399,46 +392,8 @@ fn antigravity_env_vars_for_method(method: &str) -> &'static [&'static str] {
     }
 }
 
-/// Antigravity's launch credential policy, in the spirit of
-/// [`apply_cursor_env_policy`] but strictly stronger.
-///
-/// Once the panel has recorded a method, the panel OWNS all four credential
-/// vars: a value survives into the child only if the chosen method reads it AND
-/// the panel actually stored one. Everything else is cleared — an empty value
-/// tells the spawn layer (`acp::agent_process`) to `env_remove` the inherited
-/// one.
-///
-/// UNCONDITIONALLY, unlike Cursor's version, which skips a key the caller's own
-/// `runtime_env` already set to a non-empty value. That guard makes sense when
-/// the credential and the mode are independent; here they are not. A
-/// `GEMINI_API_KEY` sitting in `merged` on an `oauth-personal` session can only
-/// come from a stale panel row (the user switched away from API-key auth) or a
-/// shell/container export — and in both cases honoring it authenticates as
-/// something other than what the user picked, silently. Keeping it would also
-/// disagree with the `auth.type` this same launch writes to settings.json.
-///
-/// The non-empty half is what makes "reads it" insufficient on its own, and it
-/// is not hypothetical — it is the Agent Platform panel's central choice. That
-/// method takes EITHER a `GOOGLE_API_KEY` or a project + location, and the
-/// server suppresses the pair whenever the key is set (its `_vertex_config`
-/// logs "project and location suppressed by the key"); the panel encodes that
-/// by hiding the project/location fields while a key is typed and DELETING
-/// `GOOGLE_API_KEY` from the stored row when it is not. Leaving the key merely
-/// "allowed" therefore let an inherited one — a dev shell, a CI container —
-/// override the project the user explicitly filled in, sending the session to
-/// another account and another billing target with nothing on screen to say so.
-/// The same reasoning covers an inherited `GOOGLE_CLOUD_PROJECT`, which would
-/// otherwise outrank the `gcp` block in the settings file codeg just wrote.
-///
-/// The cost is that a credential supplied ONLY by the surrounding environment
-/// stops working once a method is recorded — but the panel already warns about
-/// exactly that state (`missingGeminiApiKey`, `missingAgentPlatformConfig`), so
-/// this makes the launch agree with what the user was told rather than quietly
-/// contradict it.
-///
-/// Legacy rows with no recorded method — and any unrecognized value — are left
-/// completely untouched, so an operator-provisioned container env that never
-/// went through the panel keeps working.
+/// An explicit method owns its credentials and endpoint. Empty entries remove
+/// inherited values; an unconfigured row leaves native CLI authentication alone.
 fn apply_antigravity_env_policy(
     merged: &mut Vec<(String, String)>,
     runtime_env: &BTreeMap<String, String>,
@@ -465,43 +420,9 @@ fn apply_antigravity_env_policy(
     }
 }
 
-/// Project the panel's Antigravity auth choice into
-/// `<GEMINI_HOME>/antigravity-acp/settings.json`, the ONLY place the server
-/// looks for it.
-///
-/// This is load-bearing, not a convenience: `session/new` fails outright with
-/// `-32000 Authentication required` when that file declares no `auth.type`
-/// (environment-based selection was removed upstream), and codeg does not
-/// implement the ACP `authenticate` request that would otherwise set it. With
-/// the file in place the server runs its own browser OAuth loopback flow inside
-/// `session/new`, so writing it is what makes the agent usable at all.
-///
-/// Deliberately a READ-MODIFY-WRITE merge of only three keys. The file is the
-/// user's (the server parses it as Hjson and documents it as user-provided), so
-/// unknown keys and any hand-written `gcp` block survive a codeg write.
-///
-/// FAILS CLOSED, exactly like the server's own `settings_writer`: "a file that
-/// cannot be parsed is left alone, since rewriting it would delete content we
-/// could not read." A missing file means "create"; a read error, a parse error
-/// or a non-object root all mean "give up". The one place codeg is stricter is
-/// the dialect — the server parses Hjson (comments, trailing commas) and codeg
-/// only strict JSON, so a hand-commented file lands in the give-up branch
-/// rather than being flattened. The warning names the file so the user can set
-/// `auth.type` there themselves; the panel shows that same path.
-///
-/// Every failure is a warning, never a spawn failure: an `auth.type` already in
-/// the file (written by hand, by an earlier launch, or by the server's own auth
-/// picker) may well still be valid.
-///
-/// It RETURNS what happened rather than only logging it, because a silent skip
-/// here is indistinguishable from success at the only moment the user is
-/// looking. The settings panel saves the env row and says "saved" — but the row
-/// is not what authenticates the agent, this file is, and when the file cannot
-/// be rewritten the two disagree from that moment on. Switching methods is the
-/// sharp edge: the launch scrubs the credential vars for the NEW method
-/// ([`apply_antigravity_env_policy`]) while the server keeps reading the OLD
-/// `auth.type`, so the next session fails with no credential for the method it
-/// thinks it is using. The panel calls this on save and reports the answer.
+/// Merge provider selection and owned GCP fields into native CLI settings.
+/// Keys and endpoints live only in the child environment. Refuse malformed
+/// owned fields, preserve unknown settings, and leave an unconfigured row alone.
 fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> AntigravitySyncReport {
     let recorded = runtime_env
         .get(ANTIGRAVITY_AUTH_METHOD_ENV)
@@ -518,35 +439,25 @@ fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> Ant
     };
     let path = acp_dir.join("settings.json");
 
+    if recorded.is_none() {
+        return AntigravitySyncReport::current(&path);
+    }
     let existing = match read_antigravity_settings(&path) {
         Ok(existing) => existing,
         Err(reason) => {
             tracing::warn!(
                 "[ACP][Antigravity] not editing {}: {reason}. \
-                 Set `auth.type` in it yourself, or move it aside.",
+                 Set `modelProvider` in it yourself, or move it aside.",
                 path.display()
             );
             return AntigravitySyncReport::skipped(&path, reason);
         }
     };
 
-    // Fall back to the method the settings panel DISPLAYS as selected, but only
-    // when the file names none: the agent cannot start a single session without
-    // an `auth.type`, and erroring out on a user who never opened the panel
-    // would be a dead end. `oauth-personal` is the free-tier default and merely
-    // makes the server open a browser — itself a consent step — so it is safe
-    // to imply. An `auth.type` already in the file is NEVER overridden by it.
-    let existing_auth_type = existing
-        .as_ref()
-        .and_then(|root| root.get("auth"))
-        .and_then(|auth| auth.get("type"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let method = match (recorded, existing_auth_type) {
-        (Some(method), _) => method,
-        (None, Some(_)) => return AntigravitySyncReport::current(&path),
-        (None, None) => "oauth-personal",
+    let Some(method) = recorded else {
+        // An unconfigured Codeg row belongs to the native CLI. Do not replace
+        // its provider or Google account selection with a default OAuth mode.
+        return AntigravitySyncReport::current(&path);
     };
 
     // Gemini Enterprise reads project/location from this file ONLY (never the
@@ -563,7 +474,7 @@ fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> Ant
         Err(reason) => {
             tracing::warn!(
                 "[ACP][Antigravity] not editing {}: {reason}. \
-                 Set `auth.type` in it yourself, or move it aside.",
+                 Set `modelProvider` in it yourself, or move it aside.",
                 path.display()
             );
             return AntigravitySyncReport::skipped(&path, reason);
@@ -573,7 +484,7 @@ fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> Ant
     match write_antigravity_settings(&acp_dir, &path, &updated) {
         Ok(()) => {
             tracing::info!(
-                "[ACP][Antigravity] auth.type={method} recorded in {}",
+                "[ACP][Antigravity] native provider for {method} recorded in {}",
                 path.display()
             );
             AntigravitySyncReport::written(&path)
@@ -585,7 +496,7 @@ fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> Ant
     }
 }
 
-/// `<GEMINI_HOME>/antigravity-acp` for a launch carrying `runtime_env`.
+/// Native `<GEMINI_HOME>/antigravity-cli` for this launch.
 ///
 /// Resolved through the agent's OWN rules ([`crate::parsers::antigravity`]), not
 /// a local `PathBuf::from`, because `GEMINI_HOME` is one of the variables whose
@@ -593,7 +504,7 @@ fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> Ant
 /// `GEMINI_HOME=~/somewhere` mean two different directories: the server read
 /// `$HOME/somewhere`, while codeg created a folder literally named `~` under
 /// whatever directory it happened to be launched from — and wrote the
-/// `auth.type` there, so `session/new` still failed with `Authentication
+/// `modelProvider` there, so `session/new` still failed with `Authentication
 /// required` no matter how many times the panel was saved.
 ///
 /// `runtime_env` alone is enough even though the launch also merges registry,
@@ -607,7 +518,7 @@ fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> Ant
 /// the answer depends on the child's home and that home is unknowable (the
 /// launch removes `HOME`, or sets it to a relative path). Writing anyway would
 /// mean guessing, and a guess here creates a stray tree AND leaves the real
-/// `auth.type` unwritten, so the sync reports the skip instead.
+/// `modelProvider` unwritten, so the sync reports the skip instead.
 fn antigravity_acp_dir_for_env(runtime_env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
     antigravity_acp_dir_with_inherited(runtime_env, std::env::var_os("GEMINI_HOME"))
 }
@@ -616,7 +527,7 @@ fn antigravity_acp_dir_for_env(runtime_env: &BTreeMap<String, String>) -> Result
 ///
 /// Split out so the three-state resolution can be tested without mutating the
 /// process environment. A `temp_env` writer would race every other test that
-/// reads `GEMINI_HOME` — `resolve_antigravity_acp_dir` does, one assertion away
+/// reads `GEMINI_HOME` — the parser does, one assertion away
 /// in this same module — and that race is silent: the writer's value simply
 /// leaks into the reader's expectation.
 fn antigravity_acp_dir_with_inherited(
@@ -629,7 +540,7 @@ fn antigravity_acp_dir_with_inherited(
     // SETS, so an ABSENT key means the child inherits codeg's value, and a
     // container that relocates the tree does exactly that: `GEMINI_HOME` in the
     // image's own environment, nothing in the per-agent row. Reading only the
-    // row made codeg write `auth.type` — and name the token file — under
+    // row made codeg write `modelProvider` — and name the token file — under
     // `~/.gemini` (i.e. `/root/.gemini`) while the agent used the relocated
     // one, so the file the panel talked about was never the file the session
     // read.
@@ -644,7 +555,7 @@ fn antigravity_acp_dir_with_inherited(
         // it never opens.
         Some(value) => Some(std::ffi::OsString::from(value)),
         // Absent: the child inherits codeg's environment, so codeg's own answer
-        // is exact. Empty is filtered because the server's `paths.py` treats an
+        // is exact. Empty is filtered because the shared path resolver treats an
         // empty `GEMINI_HOME` as unset (`if not home`).
         None => inherited.filter(|value| !value.is_empty()),
     };
@@ -652,7 +563,7 @@ fn antigravity_acp_dir_with_inherited(
     // The CHILD's home, not codeg's. `merge_agent_env` copies `HOME` into the
     // child like any other variable, so a launch that relocates it moves both
     // the `~/.gemini` default and any `~` in `GEMINI_HOME` with it — and the
-    // server, running `os.path.expanduser` in that environment, resolves them
+    // native CLI receives the resolved absolute path from Codeg, so it uses them
     // there. Only a value that is already absolute is independent of it.
     let needs_home = configured.as_ref().is_none_or(|value| {
         let value = value.to_string_lossy();
@@ -673,8 +584,8 @@ fn antigravity_acp_dir_with_inherited(
     )
 }
 
-/// `<GEMINI_HOME>/antigravity-acp`, the ACP server's private subtree.
-const ANTIGRAVITY_ACP_SUBDIR: &str = "antigravity-acp";
+/// Native CLI settings and transcripts share this subtree.
+const ANTIGRAVITY_ACP_SUBDIR: &str = "antigravity-cli";
 
 /// What the panel is saying about one `gcp` field.
 ///
@@ -723,7 +634,7 @@ fn antigravity_gcp_field<'a>(
 #[serde(rename_all = "camelCase")]
 pub struct AntigravitySyncReport {
     /// The file this was about, shown alongside the reason so the user can go
-    /// and set `auth.type` by hand.
+    /// and set `modelProvider` by hand.
     pub path: String,
     pub status: AntigravitySyncStatus,
     /// Present only for `skipped`, in the words the log uses.
@@ -778,31 +689,15 @@ pub fn sync_antigravity_settings_for_env(
     sync_antigravity_settings_file(runtime_env)
 }
 
-/// The environment a real Antigravity launch hands the agent process.
-///
-/// Factored out of [`build_agent`]'s `Binary` branch so the browser-free
-/// sign-in flow ([`crate::acp::antigravity_login`]) can spawn the SAME binary
-/// with the SAME environment. That identity is the whole point: the sign-in
-/// child is the one that writes the OAuth token, and the token's location is
-/// decided by `GEMINI_HOME` (via `paths.py`) and its storage backend by
-/// `AGY_ACP_FORCE_FILE_STORAGE` — so a child launched with a different
-/// environment would faithfully sign the user in and then leave the credential
-/// somewhere no session ever reads.
-///
-/// Deliberately does NOT run [`sync_antigravity_settings_file`]: this returns a
-/// value and that writes a file, and the sign-in path wants the report rather
-/// than a silently dropped one. Callers run the sync themselves.
-///
-/// `scratch` is `None` for the settings panel, which builds this env to INSPECT
-/// it and spawns nothing; the sign-in/sign-out path passes its own directory.
+/// Shared launch environment for native sessions and account operations.
 pub fn antigravity_launch_env(
     runtime_env: &BTreeMap<String, String>,
     scratch: Option<&Path>,
 ) -> Vec<(String, String)> {
     let registry_env: &[(&'static str, &'static str)] =
         match registry::get_agent_meta(AgentType::Antigravity).distribution {
-            AgentDistribution::Binary { env, .. } => env,
-            // Unreachable while the registry entry stays `Binary`; an empty
+            AgentDistribution::System { env, .. } => env,
+            // Unreachable while the registry entry stays `System`; an empty
             // base is the correct answer for every other shape anyway, since
             // `runtime_env` carries everything the panel owns.
             _ => &[],
@@ -812,21 +707,23 @@ pub fn antigravity_launch_env(
     merged
 }
 
-/// The `auth.type` values Antigravity accepts, for callers that must validate a
+/// Native agy uses flags rather than GEMINI_HOME to locate its data. Keep
+/// launch, settings and history on the same root, including relocated HOME.
+pub fn antigravity_native_args(runtime_env: &BTreeMap<String, String>) -> Result<Vec<String>, AcpError> {
+    let dir = antigravity_acp_dir_for_env(runtime_env).map_err(AcpError::protocol)?;
+    let root = dir.parent().ok_or_else(|| AcpError::protocol("invalid Antigravity root"))?;
+    Ok(vec!["--gemini-dir".into(), root.to_string_lossy().into_owned(),
+        "--app-data-dir".into(), "antigravity-cli".into()])
+}
+
+/// Native ACP authentication IDs, for callers that must validate a
 /// method id before acting on it.
 pub fn is_antigravity_auth_method(method_id: &str) -> bool {
     ANTIGRAVITY_AUTH_METHODS.contains(&method_id)
 }
 
-/// What codeg can say about the method the ACP server will authenticate with.
-///
-/// Three states, and [`Unreadable`](Self::Unreadable) is emphatically not a
-/// flavor of [`Absent`](Self::Absent). The server parses Hjson and codeg only
-/// strict JSON, so a file codeg cannot read is one the SERVER can — it names a
-/// method, codeg just cannot see which. Collapsing the two would let a caller
-/// treat "I have no idea" as "there is nothing there", which for the sign-out
-/// means aiming `logout` at a flavor with nothing to clear and reporting the
-/// `{}` it answers as a success.
+/// Authentication selected by Codeg, or the native CLI provider for an
+/// unconfigured row. Used to keep API-key mode out of account logout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AntigravityAuthType {
     /// The file names this method, in its canonical spelling.
@@ -838,59 +735,23 @@ pub enum AntigravityAuthType {
     Unreadable,
 }
 
-/// The `auth.type` the ACP server will actually authenticate with, read from
-/// the file the server reads it from.
-///
-/// Deliberately NOT the method in the stored row. The two normally agree —
-/// every launch runs [`sync_antigravity_settings_file`] — but the file is the
-/// only thing the server consults (`_infer_auth_state`), so it is also what
-/// decides which flavor of credential a sign-out actually clears.
+/// Explicit Codeg intent wins because every session authenticates with it;
+/// otherwise native modelProvider identifies key mode without inspecting keys.
 pub fn antigravity_effective_auth_type(
     runtime_env: &BTreeMap<String, String>,
 ) -> AntigravityAuthType {
-    let Ok(acp_dir) = antigravity_acp_dir_for_env(runtime_env) else {
-        // The directory itself cannot be named, so neither can the file.
+    if let Some(method) = runtime_env.get(ANTIGRAVITY_AUTH_METHOD_ENV).filter(|m| is_antigravity_auth_method(m)) {
+        return AntigravityAuthType::Declared(method.clone());
+    }
+    let Ok(dir) = antigravity_acp_dir_for_env(runtime_env) else {
         return AntigravityAuthType::Unreadable;
     };
-    let parsed = match read_antigravity_settings(&acp_dir.join("settings.json")) {
-        // `Ok(None)` is specifically "no such file", which IS positive
-        // knowledge: there is no method there to find.
-        Ok(None) => return AntigravityAuthType::Absent,
-        Ok(Some(parsed)) => parsed,
-        Err(_) => return AntigravityAuthType::Unreadable,
-    };
-    parsed
-        .get("auth")
-        .and_then(|auth| auth.get("type"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        // The server resolves the legacy spelling before it tests membership,
-        // so a caller matching on canonical ids would otherwise miss it.
-        .map(|value| AntigravityAuthType::Declared(
-            canonical_antigravity_auth_method(value).to_string(),
-        ))
-        .unwrap_or(AntigravityAuthType::Absent)
-}
-
-/// The pre-rebrand `vertex-ai` spelling resolved to the id codeg uses.
-fn canonical_antigravity_auth_method(method: &str) -> &str {
-    match method {
-        "vertex-ai" => "agent-platform",
-        other => other,
+    match read_antigravity_settings(&dir.join("settings.json")) {
+        Ok(Some(v)) if v.get("modelProvider").and_then(|v| v.as_str()) == Some("gemini") =>
+            AntigravityAuthType::Declared("gemini-api-key".into()),
+        Ok(_) => AntigravityAuthType::Absent,
+        Err(_) => AntigravityAuthType::Unreadable,
     }
-}
-
-/// `<GEMINI_HOME>/antigravity-acp` for a launch carrying `runtime_env`, for
-/// callers outside this module that need to name a file the agent keeps there
-/// (its OAuth token, alongside the `settings.json` this module writes).
-///
-/// Same resolution, same `Err` contract as the private original: see
-/// [`antigravity_acp_dir_for_env`].
-pub fn antigravity_acp_dir_for_runtime_env(
-    runtime_env: &BTreeMap<String, String>,
-) -> Result<PathBuf, String> {
-    antigravity_acp_dir_for_env(runtime_env)
 }
 
 /// Read `settings.json` for editing.
@@ -936,18 +797,8 @@ fn write_antigravity_settings(
     Ok(())
 }
 
-/// Merge the panel's choice into a parsed `settings.json`.
-///
-/// `Ok(None)` means the file already says exactly this, so the caller can skip
-/// the write. `Err` means a block codeg would have to edit is not the shape it
-/// expects — the same fail-closed rule the read side applies to the whole
-/// document, and the same one the server's own `settings_writer` applies here
-/// ("not editing %r because `auth` is not an object"). Replacing a non-object
-/// `auth` with an object would delete whatever the user meant by it.
-///
-/// `existing` is `None` only for a file that does not exist — the caller
-/// refuses to touch one it could not read or parse — so creating a fresh object
-/// here never destroys anything.
+/// Preserve foreign settings while updating the native provider and owned GCP
+/// fields. None means unchanged; errors must leave the original file untouched.
 fn merge_antigravity_settings(
     existing: Option<serde_json::Value>,
     method: &str,
@@ -965,24 +816,19 @@ fn merge_antigravity_settings(
             .as_object_mut()
             .ok_or_else(|| "it does not hold a JSON object".to_string())?;
 
-        // Absent is fine (create it); present-but-not-an-object is not.
-        match obj.get("auth") {
-            None | Some(serde_json::Value::Null) => {
-                obj.insert("auth".into(), serde_json::json!({}));
-            }
-            Some(serde_json::Value::Object(_)) => {}
-            Some(_) => return Err("`auth` is not an object".to_string()),
+        // Keys stay in the child environment; only the native provider is persisted.
+        if obj.get("modelProvider").is_some_and(|v| !v.is_string() && !v.is_null()) {
+            return Err("`modelProvider` is not a string".to_string());
         }
-        obj.get_mut("auth")
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or_else(|| "`auth` is not an object".to_string())?
-            .insert("type".into(), serde_json::Value::String(method.to_string()));
+        obj.insert("modelProvider".into(), serde_json::Value::String(
+            if method == "gemini-api-key" { "gemini" } else { "" }.to_string(),
+        ));
 
         // Only touch the `gcp` block when the panel has something to say about
         // it. `Keep` on both means it is not the panel's — a field the user
         // typed straight into the file, or a method that does not render the
         // inputs at all — so a strange `gcp` is left alone rather than blocking
-        // an `auth.type` update that does not depend on it.
+        // an `modelProvider` update that does not depend on it.
         //
         // `Clear` is the case the old two-state signature could not express,
         // and it has to be honored on a block that may not exist yet only in
@@ -994,7 +840,7 @@ fn merge_antigravity_settings(
             matches!(gcp_project, GcpField::Clear) || matches!(gcp_location, GcpField::Clear);
         // A clear on a block that is not an object has nothing to remove, so it
         // must not be the thing that REFUSES the write: the same reasoning that
-        // keeps a strange `gcp` from blocking an `auth.type` update when there
+        // keeps a strange `gcp` from blocking an `modelProvider` update when there
         // is nothing to say about it at all. Only a `Set` — which really would
         // have to replace that value — earns the refusal.
         let clearable = clears
@@ -2541,18 +2387,6 @@ async fn build_agent(
                 apply_cursor_env_policy(&mut merged_env, runtime_env);
             } else if agent_type == AgentType::Grok {
                 apply_grok_env_policy(&mut merged_env, runtime_env);
-            } else if agent_type == AgentType::Antigravity {
-                apply_antigravity_env_policy(&mut merged_env, runtime_env);
-                // Kept separate from the env policy above: the other
-                // `apply_*_env_policy`s are pure, and this one WRITES the
-                // server's settings.json. It has to happen before the spawn —
-                // the file is read during `session/new`, and without it that
-                // call fails with `Authentication required`.
-                //
-                // The report is for the settings panel, which runs the same
-                // sync at save time; here it is already in the log and must
-                // never block a launch, so it is deliberately dropped.
-                let _ = sync_antigravity_settings_file(runtime_env);
             }
             let env_key_list: Vec<&str> = merged_env.iter().map(|(k, _)| k.as_str()).collect();
             if !merged_env.is_empty() {
@@ -2698,11 +2532,20 @@ async fn build_agent(
             {
                 cmd_args.push("--trust-all-tools".to_string());
             }
-            let mut server = McpServerStdio::new(meta.name, &binary_str);
-            if !cmd_args.is_empty() {
-                server = server.args(cmd_args.clone());
+            if agent_type == AgentType::Antigravity {
+                cmd_args.extend(antigravity_native_args(runtime_env)?);
             }
-            let mut merged_env = merge_agent_env(env, runtime_env, scratch);
+            // Apply all args after adding Antigravity's explicit Gemini root.
+            let mut server = McpServerStdio::new(meta.name, &binary_str).args(cmd_args.clone());
+            let mut merged_env = if agent_type == AgentType::Antigravity {
+                let report = sync_antigravity_settings_file(runtime_env);
+                if report.status == AntigravitySyncStatus::Skipped {
+                    return Err(AcpError::protocol(report.reason.unwrap_or_default()));
+                }
+                antigravity_launch_env(runtime_env, scratch)
+            } else {
+                merge_agent_env(env, runtime_env, scratch)
+            };
             prepend_agent_install_dirs_path(&mut merged_env, agent_type);
             let env_key_list: Vec<&str> = merged_env.iter().map(|(k, _)| k.as_str()).collect();
             // Same spawn-time dump as the Binary branch: which binary, which
@@ -2830,6 +2673,10 @@ pub async fn spawn_agent_connection(
     // this point.
     initial_state.env_pinned_config_option_ids =
         env_pinned_config_option_ids(agent_type, &runtime_env);
+    if agent_type == AgentType::Antigravity {
+        initial_state.antigravity_auth_method = runtime_env
+            .get(ANTIGRAVITY_AUTH_METHOD_ENV).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    }
     initial_state.trae_pat_sign_in =
         agent_type == AgentType::Trae && crate::acp::trae::pat_sign_in_requested(&runtime_env);
     // The `/model` picker rows codeg adds for this Claude, named by every
@@ -9533,6 +9380,27 @@ async fn run_connection(
                 trae_pat_sign_in_method(agent_type, trae_pat_requested, &init_resp.auth_methods)
             {
                 sign_in_trae_with_pat(&cx, &handshake, method_id).await?;
+            }
+
+            if agent_type == AgentType::Antigravity {
+                let method = state.read().await.antigravity_auth_method.clone();
+                if let Some(method) = method {
+                    if !is_antigravity_auth_method(&method)
+                        || !init_resp.auth_methods.iter().any(|m| m.id().0.as_ref() == method)
+                    {
+                        return Err(agent_client_protocol::util::internal_error(
+                            "Installed agy does not support the selected authentication method. Update agy in Agent Settings.",
+                        ));
+                    }
+                    // No fallback: a failed explicit choice must not silently
+                    // use another account or bill a different provider.
+                    unless_cancelled(&handshake, tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        cx.send_request_to(Agent, AuthenticateRequest::new(method)).block_task(),
+                    )).await?.map_err(|_| agent_client_protocol::util::internal_error(
+                        "Antigravity authentication timed out. Complete agy login on the Codeg host or use API-key authentication.",
+                    ))??;
+                }
             }
 
             let supports_fork = agent_type != AgentType::ZCode && init_resp
@@ -31742,369 +31610,93 @@ mod tests {
         assert_eq!(parsed["keep"], 1);
     }
 
-    /// The sign-out asks this instead of reading the stored row, because the
-    /// row is not what the server infers from. Getting it wrong means aiming
-    /// `logout` at a flavor that has nothing to clear — which it answers `{}`
-    /// to, so the mistake would be reported to the user as a sign-out.
     #[test]
-    fn antigravity_effective_auth_type_reads_the_file_the_server_reads() {
+    fn antigravity_native_settings_share_the_cli_root_without_storing_credentials() {
         let dir = tempfile::tempdir().unwrap();
-        let acp_dir = dir.path().join("antigravity-acp");
-        std::fs::create_dir_all(&acp_dir).unwrap();
-        let path = acp_dir.join("settings.json");
-        let home = || {
-            BTreeMap::from([(
-                "GEMINI_HOME".to_string(),
-                dir.path().to_string_lossy().to_string(),
-            )])
-        };
-
-        let declared = |method: &str| AntigravityAuthType::Declared(method.to_string());
-
-        // No file at all: positive knowledge that there is no method to find,
-        // so the server has nothing to infer from and clears both flavors.
-        assert_eq!(
-            antigravity_effective_auth_type(&home()),
-            AntigravityAuthType::Absent
-        );
-
-        std::fs::write(&path, r#"{"auth":{"type":"oauth-business"}}"#).unwrap();
-        assert_eq!(
-            antigravity_effective_auth_type(&home()),
-            declared("oauth-business")
-        );
-
-        // The FILE wins over the row, which is the whole reason this exists:
-        // the two can disagree (a hand edit, a sync codeg was refused) and only
-        // one of them is what the agent authenticates with.
-        let mut disagreeing = antigravity_runtime("oauth-personal");
-        disagreeing.extend(home());
-        assert_eq!(
-            antigravity_effective_auth_type(&disagreeing),
-            declared("oauth-business")
-        );
-
-        // The legacy spelling resolves, as it does server-side before the
-        // membership test — otherwise a caller matching canonical ids would
-        // read `vertex-ai` as "some OAuth method" and sign out of nothing.
-        std::fs::write(&path, r#"{"auth":{"type":"vertex-ai"}}"#).unwrap();
-        assert_eq!(
-            antigravity_effective_auth_type(&home()),
-            declared("agent-platform")
-        );
-
-        // An `auth` block with no type, and a blank one, are both "no method" —
-        // still positive knowledge, because codeg read the file.
-        std::fs::write(&path, r#"{"auth":{"scopes":[]}}"#).unwrap();
-        assert_eq!(
-            antigravity_effective_auth_type(&home()),
-            AntigravityAuthType::Absent
-        );
-        std::fs::write(&path, r#"{"auth":{"type":"   "}}"#).unwrap();
-        assert_eq!(
-            antigravity_effective_auth_type(&home()),
-            AntigravityAuthType::Absent
-        );
-
-        // Hjson: the server reads it and codeg does not, so the method is
-        // whatever that file says. NOT `Absent` — this is the distinction the
-        // whole enum exists for. A caller that treated it as "nothing there"
-        // would sign out of a `gemini-api-key` connection, clear nothing, and
-        // be told `{}`.
-        std::fs::write(&path, "{\n  // mine\n  \"auth\": {\"type\": \"oauth-personal\"},\n}\n")
-            .unwrap();
-        assert_eq!(
-            antigravity_effective_auth_type(&home()),
-            AntigravityAuthType::Unreadable
-        );
-
-        // And a home that cannot be named at all is unknown for the same
-        // reason: there is a file somewhere, codeg just cannot say where.
-        // Platform-native key, as in the path tests below: `child_home_dir`
-        // reads `USERPROFILE` on Windows (`expanduser` never consults `HOME`
-        // there), so blanking `HOME` removes nothing, the fallback lands on the
-        // runner's real profile, and the answer flips to `Absent`.
-        #[cfg(windows)]
-        let home_key = "USERPROFILE";
-        #[cfg(not(windows))]
-        let home_key = "HOME";
-        let unnameable = BTreeMap::from([
-            (home_key.to_string(), String::new()),
-            ("GEMINI_HOME".to_string(), String::new()),
-        ]);
-        assert_eq!(
-            antigravity_effective_auth_type(&unnameable),
-            AntigravityAuthType::Unreadable
-        );
-    }
-
-    #[test]
-    fn antigravity_settings_sync_leaves_an_unparseable_file_untouched() {
-        // End to end: a hand-commented settings.json must survive a launch
-        // byte for byte, warning instead of clobbering.
-        let dir = tempfile::tempdir().unwrap();
-        let acp_dir = dir.path().join("antigravity-acp");
-        std::fs::create_dir_all(&acp_dir).unwrap();
-        let path = acp_dir.join("settings.json");
-        let original = "{\n  // hand written\n  \"gcp\": { \"project\": \"mine\" },\n}\n";
-        std::fs::write(&path, original).unwrap();
-
-        let mut runtime = antigravity_runtime("oauth-business");
-        runtime.insert(
-            "GEMINI_HOME".to_string(),
-            dir.path().to_string_lossy().to_string(),
-        );
-        let report = sync_antigravity_settings_file(&runtime);
-
-        // The panel must be able to SAY this: the row now claims
-        // `oauth-business` while the file still says nothing at all.
-        assert_eq!(report.status, AntigravitySyncStatus::Skipped);
-        assert!(report.reason.is_some_and(|r| r.contains("strict JSON")));
-
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn antigravity_settings_sync_writes_through_gemini_home_and_defaults_the_method() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("antigravity-acp").join("settings.json");
-        let home = || {
-            BTreeMap::from([(
-                "GEMINI_HOME".to_string(),
-                dir.path().to_string_lossy().to_string(),
-            )])
-        };
-
-        // No recorded method and no file: fall back to the method the panel
-        // DISPLAYS as selected, so a user who never opened it still gets a
-        // session instead of `Authentication required`.
-        sync_antigravity_settings_file(&home());
-        let written: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(written["auth"]["type"], "oauth-personal");
-
-        // An `auth.type` already on disk is NEVER overridden by that fallback.
-        std::fs::write(&path, r#"{"auth":{"type":"gemini-api-key"},"keep":7}"#).unwrap();
-        sync_antigravity_settings_file(&home());
-        let held: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(held["auth"]["type"], "gemini-api-key");
-        assert_eq!(held["keep"], 7);
-
-        // An explicit panel choice does override it, and keeps foreign keys.
-        let mut runtime = antigravity_runtime("oauth-business");
-        runtime.extend(home());
-        runtime.insert("GOOGLE_CLOUD_PROJECT".to_string(), "acme".to_string());
-        runtime.insert("GOOGLE_CLOUD_LOCATION".to_string(), "eu".to_string());
+        let mut runtime = antigravity_runtime("gemini-api-key");
+        runtime.insert("GEMINI_HOME".into(), dir.path().to_string_lossy().into_owned());
+        runtime.insert("GEMINI_API_KEY".into(), "private-tokenkey-key".into());
+        runtime.insert("GOOGLE_GEMINI_BASE_URL".into(), "https://gateway.example".into());
+        let native = dir.path().join("antigravity-cli");
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(native.join("settings.json"), r#"{"customModelsConfig":{"customModels":[]},"keep":true}"#).unwrap();
+        assert_eq!(sync_antigravity_settings_file(&runtime).status, AntigravitySyncStatus::Written);
+        let raw = std::fs::read_to_string(native.join("settings.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["modelProvider"], "gemini");
+        assert_eq!(value["keep"], true);
+        assert_eq!(value["customModelsConfig"], serde_json::json!({"customModels":[]}));
+        assert!(value.get("auth").is_none());
+        assert!(!raw.contains("private-tokenkey-key"));
+        assert!(!raw.contains("gateway.example"));
+        assert!(!dir.path().join("antigravity-acp").exists());
+        assert_eq!(sync_antigravity_settings_file(&runtime).status, AntigravitySyncStatus::AlreadyCurrent);
+        let args = antigravity_native_args(&runtime).unwrap();
+        assert_eq!(args, vec!["--gemini-dir", dir.path().to_str().unwrap(), "--app-data-dir", "antigravity-cli"]);
+        assert_eq!(antigravity_effective_auth_type(&runtime), AntigravityAuthType::Declared("gemini-api-key".into()));
+        runtime.insert(ANTIGRAVITY_AUTH_METHOD_ENV.into(), "oauth-personal".into());
         sync_antigravity_settings_file(&runtime);
-        let updated: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(updated["auth"]["type"], "oauth-business");
-        assert_eq!(updated["gcp"]["project"], "acme");
-        assert_eq!(updated["gcp"]["location"], "eu");
-        assert_eq!(updated["keep"], 7);
+        let value = read_antigravity_settings(&native.join("settings.json")).unwrap().unwrap();
+        assert_eq!(value["modelProvider"], "");
     }
 
     #[test]
-    fn antigravity_settings_merge_preserves_foreign_keys_and_skips_no_op_writes() {
-        // The file is the USER's: the server parses it as Hjson and documents
-        // it as user-provided, so a codeg write may only touch `auth.type` and
-        // the `gcp` block.
-        let existing = serde_json::json!({
-            "auth": { "type": "gemini-api-key" },
-            "gcp": { "project": "hand-written", "location": "eu" },
-            "someFutureKey": { "nested": [1, 2, 3] }
-        });
-        let merged = merge_antigravity_settings(
-            Some(existing.clone()),
-            "oauth-business",
-            GcpField::Keep,
-            GcpField::Keep,
-        )
-            .expect("editable")
-            .expect("auth.type changed, so this is a real write");
-        assert_eq!(merged["auth"]["type"], "oauth-business");
-        // No panel values supplied ⇒ the hand-written gcp block is untouched.
-        assert_eq!(merged["gcp"]["project"], "hand-written");
-        assert_eq!(merged["gcp"]["location"], "eu");
-        assert_eq!(merged["someFutureKey"]["nested"][2], 3);
-
-        // Panel values overwrite only the fields they carry.
-        let merged =
-            merge_antigravity_settings(
-                Some(existing.clone()),
-                "oauth-business",
-                GcpField::Set("proj"),
-                GcpField::Keep,
-            )
-                .expect("editable")
-                .expect("changed");
-        assert_eq!(merged["gcp"]["project"], "proj");
-        assert_eq!(merged["gcp"]["location"], "eu", "location was not supplied");
-
-        // Already says exactly this ⇒ no write.
-        assert!(
-            merge_antigravity_settings(Some(existing), "gemini-api-key", GcpField::Keep, GcpField::Keep)
-                .expect("editable")
-                .is_none()
-        );
-
-        // No file at all: created from scratch. (A non-object ROOT never gets
-        // here — the read side already refused it.)
-        let created = merge_antigravity_settings(None, "oauth-personal", GcpField::Set("p"), GcpField::Set("global"))
-            .expect("editable")
-            .expect("created");
-        assert_eq!(created["auth"]["type"], "oauth-personal");
-        assert_eq!(created["gcp"]["project"], "p");
-        assert_eq!(created["gcp"]["location"], "global");
+    fn antigravity_unconfigured_launch_preserves_native_provider_and_foreign_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = BTreeMap::from([("GEMINI_HOME".into(), dir.path().to_string_lossy().into_owned())]);
+        let native = dir.path().join("antigravity-cli");
+        std::fs::create_dir_all(&native).unwrap();
+        let path = native.join("settings.json");
+        let original = r#"{"modelProvider":"gemini","keep":true}"#;
+        std::fs::write(&path, original).unwrap();
+        assert_eq!(sync_antigravity_settings_file(&runtime).status, AntigravitySyncStatus::AlreadyCurrent);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(antigravity_effective_auth_type(&runtime), AntigravityAuthType::Declared("gemini-api-key".into()));
     }
 
     #[test]
-    fn antigravity_settings_merge_refuses_blocks_that_are_not_objects() {
-        // The vendor's `_auth_block` logs "not editing %r because `auth` is not
-        // an object" and gives up. Replacing that value with an object would
-        // delete whatever the user meant by it, so codeg refuses too.
-        let odd_auth = serde_json::json!({ "auth": "managed-elsewhere", "keep": 1 });
-        assert!(merge_antigravity_settings(Some(odd_auth), "oauth-personal", GcpField::Keep, GcpField::Keep).is_err());
-
-        // Same for `gcp` — but ONLY when there is actually something to write
-        // into it. With no project or location supplied, a strange `gcp` is
-        // none of codeg's business and must not block the `auth.type` update.
-        let odd_gcp = serde_json::json!({ "gcp": ["not", "an", "object"] });
-        assert!(
-            merge_antigravity_settings(
-                Some(odd_gcp.clone()),
-                "oauth-personal",
-                GcpField::Set("p"),
-                GcpField::Keep,
-            )
-                .is_err()
-        );
-        let untouched = merge_antigravity_settings(Some(odd_gcp), "oauth-personal", GcpField::Keep, GcpField::Keep)
-            .expect("editable")
-            .expect("auth.type still written");
-        assert_eq!(untouched["auth"]["type"], "oauth-personal");
-        assert_eq!(untouched["gcp"], serde_json::json!(["not", "an", "object"]));
-
-        // An explicit JSON null reads as absent, not as a foreign shape.
-        let null_auth = serde_json::json!({ "auth": null, "keep": 2 });
-        let filled = merge_antigravity_settings(
-            Some(null_auth),
-            "gemini-api-key",
-            GcpField::Keep,
-            GcpField::Keep,
-        )
-            .expect("editable")
-            .expect("changed");
-        assert_eq!(filled["auth"]["type"], "gemini-api-key");
-        assert_eq!(filled["keep"], 2);
-    }
-
-    /// Clearing the project and location in the panel has to REACH the file.
-    ///
-    /// The old signature could not say it: "the panel does not manage this
-    /// field" and "the panel manages it and the user emptied it" both arrived
-    /// as `None`, and the merge left the block alone for both. So the values
-    /// written by an earlier save stayed in force forever — and for
-    /// `oauth-business` that file is the ONLY place the project comes from, so
-    /// the agent kept authenticating against a project the UI showed nowhere.
-    #[test]
-    fn antigravity_settings_gcp_fields_can_be_cleared_by_the_panel() {
-        let existing = || {
-            serde_json::json!({
-                "auth": { "type": "oauth-business" },
-                "gcp": { "project": "stale", "location": "eu" },
-                "keep": 1
-            })
-        };
-
-        // The panel owns both fields for this method and both are now empty.
-        let cleared =
-            merge_antigravity_settings(Some(existing()), "oauth-business", GcpField::Clear, GcpField::Clear)
-                .expect("editable")
-                .expect("the gcp block changed, so this is a real write");
-        assert!(
-            cleared.get("gcp").is_none(),
-            "an emptied block should go rather than linger as {{}}: {cleared}"
-        );
-        assert_eq!(cleared["auth"]["type"], "oauth-business");
-        assert_eq!(cleared["keep"], 1, "foreign keys still survive a clear");
-
-        // One cleared, one set.
-        let partial =
-            merge_antigravity_settings(Some(existing()), "oauth-business", GcpField::Set("new"), GcpField::Clear)
-                .expect("editable")
-                .expect("changed");
-        assert_eq!(partial["gcp"]["project"], "new");
-        assert!(partial["gcp"].get("location").is_none());
-
-        // A clear with nothing on disk to clear is not a write — otherwise
-        // every launch would rewrite a running server's file for nothing.
-        assert!(merge_antigravity_settings(
-            Some(serde_json::json!({ "auth": { "type": "oauth-business" } })),
-            "oauth-business",
-            GcpField::Clear,
-            GcpField::Clear,
-        )
-        .expect("editable")
-        .is_none());
-
-        // And a clear against a `gcp` that is not an object must not REFUSE the
-        // edit: there is nothing there to remove, so it is the same "none of
-        // codeg's business" case as having nothing to say, and blocking would
-        // take the `auth.type` update down with it — the one part of this file
-        // the agent cannot start without.
-        let odd = serde_json::json!({ "gcp": ["not", "an", "object"] });
-        let still_written =
-            merge_antigravity_settings(Some(odd), "oauth-business", GcpField::Clear, GcpField::Clear)
-                .expect("a clear must not refuse a block it cannot edit")
-                .expect("auth.type still written");
-        assert_eq!(still_written["auth"]["type"], "oauth-business");
-        assert_eq!(
-            still_written["gcp"],
-            serde_json::json!(["not", "an", "object"])
-        );
-    }
-
-    /// Which fields count as the panel's is decided by the METHOD, so a
-    /// hand-written block under a method that never renders those inputs is
-    /// still none of codeg's business.
-    #[test]
-    fn antigravity_gcp_ownership_follows_the_recorded_method() {
-        let empty = BTreeMap::new();
-        for method in ["oauth-business", "agent-platform"] {
-            assert!(matches!(
-                antigravity_gcp_field(&empty, Some(method), "GOOGLE_CLOUD_PROJECT"),
-                GcpField::Clear
-            ));
+    fn antigravity_native_settings_refuse_malformed_owned_fields_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = antigravity_runtime("gemini-api-key");
+        runtime.insert("GEMINI_HOME".into(), dir.path().to_string_lossy().into_owned());
+        let native = dir.path().join("antigravity-cli");
+        std::fs::create_dir_all(&native).unwrap();
+        let path = native.join("settings.json");
+        for raw in ["not JSON", r#"{"modelProvider":42}"#, "[]"] {
+            std::fs::write(&path, raw).unwrap();
+            assert_eq!(sync_antigravity_settings_file(&runtime).status, AntigravitySyncStatus::Skipped);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
         }
-        // The two methods with no project/location inputs, and a legacy row
-        // with no recorded method at all.
-        for method in [Some("oauth-personal"), Some("gemini-api-key"), None] {
-            assert!(matches!(
-                antigravity_gcp_field(&empty, method, "GOOGLE_CLOUD_PROJECT"),
-                GcpField::Keep
-            ));
-        }
-        // A value present is always a write, whoever recorded it.
-        let filled = BTreeMap::from([("GOOGLE_CLOUD_PROJECT".to_string(), " p ".to_string())]);
-        assert!(matches!(
-            antigravity_gcp_field(&filled, Some("oauth-business"), "GOOGLE_CLOUD_PROJECT"),
-            GcpField::Set("p")
-        ));
     }
 
-    /// A `GEMINI_HOME` that only codeg's OWN environment carries still names
-    /// the directory the agent uses.
-    ///
-    /// `merge_agent_env` lists the variables a launch SETS; anything absent is
-    /// inherited, and relocating the tree from a container's environment
-    /// (`GEMINI_HOME=/data/gemini` in the image, nothing in the per-agent row)
-    /// is exactly that shape. Treating "absent" as "unset" sent codeg to
-    /// `~/.gemini` — so on a Docker deployment it wrote `auth.type` into
-    /// `/root/.gemini` while the agent read the relocated file, and the panel
-    /// named a token path that was never written. The same three-state
-    /// distinction `child_home_dir` makes for `HOME`, for the same reason.
+    #[test]
+    fn antigravity_native_settings_merge_preserves_other_values_and_clears_projects() {
+        let original = serde_json::json!({"modelProvider":"gemini","auth":"foreign","gcp":{"project":"old","location":"us","keep":1},"customModelsConfig":{}});
+        let value = merge_antigravity_settings(Some(original), "oauth-business", GcpField::Set("new"), GcpField::Clear).unwrap().unwrap();
+        assert_eq!(value["modelProvider"], "");
+        assert_eq!(value["auth"], "foreign");
+        assert_eq!(value["gcp"], serde_json::json!({"project":"new","keep":1}));
+        assert_eq!(value["customModelsConfig"], serde_json::json!({}));
+        assert!(merge_antigravity_settings(Some(value), "oauth-business", GcpField::Set("new"), GcpField::Clear).unwrap().is_none());
+        assert!(merge_antigravity_settings(Some(serde_json::json!({"gcp":42})), "oauth-business", GcpField::Set("new"), GcpField::Keep).is_err());
+    }
+
+    #[test]
+    fn antigravity_endpoint_is_kept_only_for_api_key_auth_and_cleared_when_empty() {
+        for method in ANTIGRAVITY_AUTH_METHODS {
+            let mut runtime = antigravity_runtime(method);
+            runtime.insert("GEMINI_API_KEY".into(), "key".into());
+            runtime.insert("GOOGLE_GEMINI_BASE_URL".into(), "https://gateway.example".into());
+            let merged: BTreeMap<_,_> = antigravity_launch_env(&runtime, None).into_iter().collect();
+            assert_eq!(merged["GOOGLE_GEMINI_BASE_URL"], if *method == "gemini-api-key" { "https://gateway.example" } else { "" });
+            assert_eq!(merged["GEMINI_API_KEY"], if *method == "gemini-api-key" { "key" } else { "" });
+        }
+        let runtime = antigravity_runtime("gemini-api-key");
+        let merged: BTreeMap<_,_> = antigravity_launch_env(&runtime, None).into_iter().collect();
+        assert_eq!(merged["GOOGLE_GEMINI_BASE_URL"], "");
+        assert_eq!(merged["GEMINI_API_KEY"], "");
+    }
+
     #[test]
     fn antigravity_settings_path_follows_a_gemini_home_codeg_only_inherits() {
         // Platform-native, and HOME is pinned in the row rather than read from
@@ -32171,7 +31763,7 @@ mod tests {
     /// Antigravity runs `os.path.expanduser` on the value
     /// (`acp_server/paths.py`). codeg built the path with a bare
     /// `PathBuf::from`, so it created a directory literally named `~` under its
-    /// own working directory and wrote `auth.type` into THAT — leaving
+    /// own working directory and wrote `modelProvider` into THAT — leaving
     /// `session/new` failing with `Authentication required` no matter how many
     /// times the panel was saved.
     #[test]
@@ -32180,7 +31772,7 @@ mod tests {
         let runtime = BTreeMap::from([("GEMINI_HOME".to_string(), "~/agy-test".to_string())]);
         assert_eq!(
             antigravity_acp_dir_for_env(&runtime).expect("nameable"),
-            home.join("agy-test").join("antigravity-acp")
+            home.join("agy-test").join("antigravity-cli")
         );
 
         // …and against the CHILD's home when the launch relocates it, since the
@@ -32203,7 +31795,7 @@ mod tests {
             antigravity_acp_dir_for_env(&relocated).expect("nameable"),
             PathBuf::from(child_home)
                 .join("profile")
-                .join("antigravity-acp")
+                .join("antigravity-cli")
         );
         // The `~/.gemini` default follows it too.
         let default_under_child =
@@ -32212,10 +31804,10 @@ mod tests {
             antigravity_acp_dir_for_env(&default_under_child).expect("nameable"),
             PathBuf::from(child_home)
                 .join(".gemini")
-                .join("antigravity-acp")
+                .join("antigravity-cli")
         );
         // With the home REMOVED for the child there is no honest answer, and a
-        // guess would both strand a tree and leave auth.type unwritten.
+        // guess would both strand a tree and leave modelProvider unwritten.
         let no_home = BTreeMap::from([
             (home_key.to_string(), String::new()),
             ("GEMINI_HOME".to_string(), "~/profile".to_string()),
@@ -32228,7 +31820,7 @@ mod tests {
         ]);
         assert_eq!(
             antigravity_acp_dir_for_env(&no_home_absolute).expect("nameable"),
-            PathBuf::from("/srv/gemini").join("antigravity-acp")
+            PathBuf::from("/srv/gemini").join("antigravity-cli")
         );
 
         // An absolute value is still taken verbatim, and an EXACTLY empty one
@@ -32237,34 +31829,13 @@ mod tests {
         let absolute = BTreeMap::from([("GEMINI_HOME".to_string(), "/srv/gemini".to_string())]);
         assert_eq!(
             antigravity_acp_dir_for_env(&absolute).expect("nameable"),
-            PathBuf::from("/srv/gemini").join("antigravity-acp")
+            PathBuf::from("/srv/gemini").join("antigravity-cli")
         );
         let removed = BTreeMap::from([("GEMINI_HOME".to_string(), String::new())]);
         assert_eq!(
             antigravity_acp_dir_for_env(&removed).expect("nameable"),
-            crate::parsers::antigravity::resolve_antigravity_acp_dir()
+            crate::parsers::antigravity::resolve_antigravity_cli_dir()
         );
-    }
-
-    #[test]
-    fn antigravity_settings_sync_leaves_a_foreign_auth_block_untouched() {
-        // End to end: the refusal must reach the file, not just the merge.
-        let dir = tempfile::tempdir().unwrap();
-        let acp_dir = dir.path().join("antigravity-acp");
-        std::fs::create_dir_all(&acp_dir).unwrap();
-        let path = acp_dir.join("settings.json");
-        let original = r#"{"auth":"managed-elsewhere","keep":1}"#;
-        std::fs::write(&path, original).unwrap();
-
-        let mut runtime = antigravity_runtime("oauth-personal");
-        runtime.insert(
-            "GEMINI_HOME".to_string(),
-            dir.path().to_string_lossy().to_string(),
-        );
-        let report = sync_antigravity_settings_file(&runtime);
-
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        assert_eq!(report.status, AntigravitySyncStatus::Skipped);
     }
 
     #[test]
@@ -36508,6 +36079,8 @@ mod tests {
     struct HandshakeScript {
         /// Never answer Initialize.
         stall_initialize: bool,
+        /// Advertise native API-key auth; true refuses the authenticate call.
+        antigravity_auth: Option<bool>,
         /// While opening the session, have codeg run this command line in a
         /// terminal it hosts, and report "terminal started" once it has.
         terminal: Option<String>,
@@ -36538,6 +36111,7 @@ mod tests {
 
             let HandshakeScript {
                 stall_initialize,
+                antigravity_auth,
                 terminal,
                 fail_session_new,
                 load_error,
@@ -36546,6 +36120,7 @@ mod tests {
             let advertises_load = load_error.is_some();
             let advertises_resume = resume_error.is_some();
             let (seen_tx, seen) = mpsc::unbounded_channel();
+            let auth_seen = seen_tx.clone();
             let (init_seen, new_seen, load_seen, resume_seen, prompt_seen) = (
                 seen_tx.clone(),
                 seen_tx.clone(),
@@ -36579,13 +36154,28 @@ mod tests {
                             if advertises_resume {
                                 sessions = sessions.resume(SessionResumeCapabilities::new());
                             }
-                            responder.respond(
-                                InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
-                                    AgentCapabilities::new()
-                                        .load_session(advertises_load)
-                                        .session_capabilities(sessions),
-                                ),
-                            )
+                            let mut response = InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                                AgentCapabilities::new().load_session(advertises_load).session_capabilities(sessions),
+                            );
+                            if antigravity_auth.is_some() {
+                                response = response.auth_methods(vec![serde_json::from_value(serde_json::json!({
+                                    "id":"gemini-api-key", "name":"Gemini API key"
+                                })).unwrap()]);
+                            }
+                            responder.respond(response)
+                        },
+                        on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |req: AuthenticateRequest,
+                                    responder: Responder<agent_client_protocol::schema::v1::AuthenticateResponse>,
+                                    _cx: ConnectionTo<Client>| {
+                            let _ = auth_seen.send(format!("authenticate:{}", req.method_id.0));
+                            if antigravity_auth == Some(true) {
+                                responder.respond_with_error(serde_json::from_value(serde_json::json!({"code":-32000,"message":"Authentication required"})).unwrap())
+                            } else {
+                                responder.respond(serde_json::from_value(serde_json::json!({})).unwrap())
+                            }
                         },
                         on_receive_request!(),
                     )
@@ -36727,12 +36317,20 @@ mod tests {
             client_end: agent_client_protocol::Channel,
             session_id: Option<&str>,
         ) -> Self {
+            Self::start_configured(client_end, session_id, None).await
+        }
+
+        async fn start_configured(
+            client_end: agent_client_protocol::Channel,
+            session_id: Option<&str>,
+            native_auth: Option<&str>,
+        ) -> Self {
             let session_id = session_id.map(str::to_string);
             let dir = tempfile::tempdir().expect("tempdir");
             let cwd = dir.path().to_path_buf();
             // An agent codeg forwards no MCP servers to, so the handshake reads
             // no MCP config from the machine running the test.
-            let agent_type = AgentType::OpenClaw;
+            let agent_type = if native_auth.is_some() { AgentType::Antigravity } else { AgentType::OpenClaw };
             let state = Arc::new(RwLock::new(SessionState::new(
                 "conn-handshake".to_string(),
                 agent_type,
@@ -36740,6 +36338,7 @@ mod tests {
                 "test-window".to_string(),
                 None,
             )));
+            state.write().await.antigravity_auth_method = native_auth.map(str::to_string);
             let events = state.read().await.event_stream().subscribe();
             let (cmd_tx, cmd_rx) = mpsc::channel(32);
             let handshake = CancellationToken::new();
@@ -36828,6 +36427,37 @@ mod tests {
             }
             (ended, emitted)
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn antigravity_authenticates_before_creating_a_session_and_never_falls_back() {
+        for refusal in [false, true] {
+            let (client, peer) = agent_client_protocol::Channel::duplex();
+            let mut agent = HandshakeAgent::start(peer, HandshakeScript { antigravity_auth: Some(refusal), ..Default::default() });
+            let run = HandshakeRun::start_configured(client, None, Some("gemini-api-key")).await;
+            assert_eq!(agent.next_request().await, "initialize");
+            assert_eq!(agent.next_request().await, "authenticate:gemini-api-key");
+            if refusal {
+                let (ended, _) = run.ended().await;
+                assert!(ended.is_err());
+                assert!(!agent.seen.try_recv().is_ok_and(|request| request == "session/new"));
+            } else {
+                assert_eq!(agent.next_request().await, "session/new");
+                run.handshake.cancel();
+                let _ = run.ended().await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn antigravity_rejects_a_method_the_installed_cli_does_not_advertise() {
+        let (client, peer) = agent_client_protocol::Channel::duplex();
+        let mut agent = HandshakeAgent::start(peer, HandshakeScript::default());
+        let run = HandshakeRun::start_configured(client, None, Some("gemini-api-key")).await;
+        assert_eq!(agent.next_request().await, "initialize");
+        let (ended, _) = run.ended().await;
+        assert!(ended.unwrap_err().to_string().contains("does not support"));
+        assert!(agent.seen.try_recv().is_err());
     }
 
     /// A connection let go while its agent has not answered Initialize stops

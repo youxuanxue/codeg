@@ -488,6 +488,7 @@ pub struct SessionState {
     ///
     /// Backend-internal — not serialized, not carried on `to_snapshot()`.
     pub trae_pat_sign_in: bool,
+    pub antigravity_auth_method: Option<String>,
     /// Pi's native `enabledModels` scope for this launch. The ACP adapter
     /// advertises every authenticated model, so the connection layer applies
     /// this Pi-only preference before publishing the model selector.
@@ -939,6 +940,7 @@ impl SessionState {
             agent_chosen_config_values: BTreeMap::new(),
             env_pinned_config_option_ids: Vec::new(),
             trae_pat_sign_in: false,
+            antigravity_auth_method: None,
             pi_enabled_model_patterns: None,
             prompt_capabilities: None,
             fork_supported: false,

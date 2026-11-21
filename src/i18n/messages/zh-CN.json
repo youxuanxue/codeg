@@ -1080,7 +1080,10 @@
       "saveRawConfig": "保存文件"
     },
     "antigravity": {
-      "configDescription": "Antigravity 必须先选定认证方式才能开始会话。所选方式会写入 $GEMINI_HOME/antigravity-acp/settings.json 的 auth.type —— 这是 ACP 服务端唯一读取的位置，不写就每次新建会话都会报 “Authentication required”。模型与会话模式不在这里：Antigravity 通过 ACP 上报它们，由输入框的选择器按会话管理。",
+      "nativeLoginHint": "Google 登录：在 Codeg 所在机器的终端运行以下命令，完成原生登录后重新打开会话。自定义 GEMINI_HOME 时，请为命令附加相同的 --gemini-dir 路径。",
+      "baseUrlLabel": "自定义 API 地址（可选）",
+      "baseUrlHint": "TokenKey 等 Gemini 兼容服务的根地址；留空使用 Google 官方 API。API Key 仅传入智能体进程，不写入原生配置文件。",
+      "configDescription": "使用本机安装的 agy acp，共享原生 CLI 的配置和登录账户。选择 Gemini API Key 可接入 TokenKey 等 Gemini 兼容服务。模型和权限模式由会话选择器管理。",
       "methodLabel": "认证方式",
       "methods": {
         "oauth-personal": "使用 Google 账号登录",
@@ -1089,9 +1092,9 @@
         "agent-platform": "Gemini Enterprise Agent Platform"
       },
       "methodHints": {
-        "oauth-personal": "你的 Google 账号，任意 Antigravity 套餐（含免费版）均可。首次新建会话会自动打开浏览器完成登录，之后令牌会被缓存复用。本机没有浏览器？用下面的免浏览器登录。",
-        "oauth-business": "你的 Gemini Enterprise 账号。需要填 GCP 项目与区域，首次新建会话会打开浏览器。本机没有浏览器？用下面的免浏览器登录。",
-        "gemini-api-key": "Gemini Developer API 的密钥，以 GEMINI_API_KEY 传给智能体。",
+        "oauth-personal": "在 Codeg 主机终端运行 agy acp --login，使用 Google 账号登录后重新打开会话。",
+        "oauth-business": "使用 Gemini Enterprise 账号及 GCP 项目和位置。在 Codeg 主机完成原生 agy 登录后重新打开会话。",
+        "gemini-api-key": "使用 Gemini API Key，可选 TokenKey 等自定义 API 地址，无需 Google 登录。",
         "agent-platform": "即原 Vertex AI。可用 API Key，或用项目 + 区域配合应用默认凭据（gcloud auth application-default login）。"
       },
       "geminiApiKeyLabel": "Gemini API Key",
@@ -1102,29 +1105,12 @@
       "missingGeminiApiKey": "请填写 Gemini API Key，或改用其他认证方式 —— 否则会话无法启动。",
       "missingAgentPlatformConfig": "请填写 API Key，或同时填写项目与区域 —— 二者缺一不可，否则会话无法启动。",
       "missingEnterpriseConfig": "Gemini Enterprise 需要同时填写项目与区域。",
-      "settingsFileHint": "auth.type 会保存到该文件；你自己写在里面的其他键会原样保留。",
-      "syncSkipped": "你的选择已经存下来了，但 codeg 没能写进 ACP 服务端的 settings.json，所以 Antigravity 仍然按那个文件里写的方式认证。请自己在里面设置 auth.type，或者把它挪走再保存一次。",
+      "settingsFileHint": "原生 CLI 配置文件；Codeg 仅同步 modelProvider 和当前认证方式所需的项目配置。",
+      "syncSkipped": "配置已保存，但无法同步原生 CLI 配置文件；请检查下方原因后重新保存。",
       "save": "保存",
-      "headless": {
-        "title": "在没有浏览器的机器上登录",
-        "description": "Antigravity 的 Google 登录由智能体自己发起，浏览器必须开在运行智能体的那台机器上。部署在无桌面服务器上的 codeg 没有浏览器，首次新建会话会等待 5 分钟后失败。改从这里登录：把链接拿到任意设备上打开，再把跳转后的地址粘回来。",
-        "start": "获取登录链接",
-        "saveFirst": "请先保存——登录用的是已保存的设置，而不是上面刚填的内容。",
-        "step1": "1. 打开这个链接并登录 Google 账号。",
-        "step2": "2. 浏览器最终会跳到 {redirectUri} 并提示无法访问——这是正常的。把地址栏里的完整地址复制出来粘贴到下面。",
-        "copyLink": "复制链接",
-        "openLink": "在新标签页打开",
-        "complete": "完成登录",
-        "cancel": "取消",
-        "signedIn": "已登录，新会话将使用该账号。",
-        "alreadySignedIn": "Antigravity 本来就持有有效令牌，无需链接即已登录。",
-        "failed": "登录未完成。",
-        "startFailed": "无法开始登录",
-        "credentialHint": "令牌缓存在这里。把这个文件复制到其他无桌面机器，那台也就登录好了。"
-      },
       "signOut": {
         "title": "登录了错误的账号？",
-        "description": "Antigravity 会缓存登录时使用的 Google 账号并静默复用，所以再次登录也换不到别的账号。退出登录会清除已保存的凭据；正在运行的 Antigravity 会话会先被结束，否则它们会把旧账号写回去。",
+        "description": "退出会移除与原生 agy CLI 共用的 Google 凭据。Codeg 会先停止自身正在运行的 Antigravity 会话。之后运行 agy acp --login 可选择其他账号。",
         "action": "退出登录",
         "done": "已退出登录。重新登录即可选择其他账号。",
         "failed": "退出登录失败"

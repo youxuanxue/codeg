@@ -6815,22 +6815,8 @@ pub(crate) fn pi_project_trust_launch_block(
     ))
 }
 
-/// Write Antigravity's `auth.type` (and `gcp` block) from the STORED agent row,
-/// and report what happened.
-///
-/// The settings panel calls this straight after saving. The launch path runs the
-/// same sync, but only at launch and only into the log — which made the panel's
-/// "saved" mean less than it looked: the env row is not what authenticates
-/// Antigravity, `<GEMINI_HOME>/antigravity-acp/settings.json` is, and when that
-/// file cannot be rewritten (it is Hjson with comments, it is unreadable, its
-/// `auth` is not an object) the two part ways silently. Switching methods is
-/// where that bites: the launch scrubs the credentials for the NEW method while
-/// the server still reads the OLD `auth.type`, so `session/new` fails with no
-/// credential for the method it believes it is using — hours after the save
-/// that caused it.
-///
-/// Reads the row rather than taking the env from the caller so it reports on
-/// what was actually persisted, not on what the request claimed.
+/// Synchronize native provider settings from the persisted agent row.
+/// The panel displays unsafe-merge failures; the launch path blocks on them.
 pub(crate) async fn acp_sync_antigravity_settings_core(
     db: &AppDatabase,
 ) -> Result<crate::acp::connection::AntigravitySyncReport, AcpError> {
@@ -6840,14 +6826,7 @@ pub(crate) async fn acp_sync_antigravity_settings_core(
     ))
 }
 
-/// The environment a real Antigravity launch would compose from the STORED row.
-///
-/// The read error is PROPAGATED, unlike the `.ok().flatten()` the pi trust path
-/// uses. Treating a failed read as "no row" would not merely lose the method —
-/// it would hand the caller an empty environment, which on a machine with no
-/// settings.json yet writes `oauth-personal` and reports success for a choice
-/// the user did not make, and which points the browser-free sign-in at the
-/// default `~/.gemini` rather than the relocated `GEMINI_HOME` a session uses.
+/// Read persisted launch settings; a database error must not select another profile.
 async fn antigravity_runtime_env(db: &AppDatabase) -> Result<BTreeMap<String, String>, AcpError> {
     let setting = agent_setting_service::get_by_agent_type(&db.conn, AgentType::Antigravity)
         .await
@@ -6860,12 +6839,7 @@ async fn antigravity_runtime_env(db: &AppDatabase) -> Result<BTreeMap<String, St
     ))
 }
 
-/// Start a browser-free Antigravity sign-in and hand back the link to open.
-///
-/// For headless deployments (codeg on a Linux server, no desktop), where the
-/// agent's own loopback browser flow cannot complete: it opens a browser that
-/// does not exist and then blocks for five minutes inside `session/new`. See
-/// [`crate::acp::antigravity_login`].
+/// Compatibility endpoint returning the native agy login instructions.
 pub(crate) async fn acp_antigravity_login_start_core(
     db: &AppDatabase,
     method_id: String,
@@ -9497,15 +9471,9 @@ fn agent_local_config_path(agent_type: AgentType) -> Option<PathBuf> {
     match agent_type {
         AgentType::ClaudeCode => Some(home_dir_or_default().join(".claude").join("settings.json")),
         AgentType::Gemini => Some(home_dir_or_default().join(".gemini").join("settings.json")),
-        // Antigravity's ACP server keeps its own `settings.json` under
-        // `<GEMINI_HOME>/antigravity-acp/` — a DIFFERENT file from Gemini
-        // CLI's above, even though both trees default to `~/.gemini`. Exposing
-        // the path lights up "open config file"; the write side is owned by
-        // `acp::connection::sync_antigravity_settings_file` at launch, which
-        // merges only `auth.type` and the `gcp` block and leaves every other
-        // key the user put there alone.
+        // Native CLI settings are shared with the user's terminal install.
         AgentType::Antigravity => {
-            Some(crate::parsers::antigravity::resolve_antigravity_acp_dir().join("settings.json"))
+            Some(crate::parsers::antigravity::resolve_antigravity_cli_dir().join("settings.json"))
         }
         AgentType::OpenCode => Some(resolve_opencode_config_path()),
         // The CLI's live credential store, NOT the legacy `globalState.json`
@@ -9565,10 +9533,8 @@ pub(crate) fn agent_system_instructions_path(agent_type: AgentType) -> Option<Pa
         AgentType::Gemini => {
             Some(crate::parsers::gemini::resolve_gemini_base_dir().join("GEMINI.md"))
         }
-        // Antigravity reads every one of `~/.gemini/{AGENTS,GEMINI}.md` from a
-        // hardcoded `~/.gemini` (it ignores `GEMINI_HOME`); `AGENTS.md` keeps
-        // it apart from Gemini CLI's `GEMINI.md`.
-        AgentType::Antigravity => Some(home_dir_or_default().join(".gemini").join("AGENTS.md")),
+        // Global customizations belong to the native CLI, not Gemini CLI.
+        AgentType::Antigravity => Some(crate::parsers::antigravity::resolve_antigravity_cli_dir().join("AGENTS.md")),
         AgentType::OpenCode => Some(
             crate::acp::opencode_config::config_dir()
                 .unwrap_or_else(|| home_dir_or_default().join(".config").join("opencode"))
@@ -10126,33 +10092,13 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
                 ".agents/skills",
             ],
         }),
-        // Antigravity's roots are `server.py::resolve_skills_paths`, verbatim
-        // and in its order:
-        //
-        //   home       `<GEMINI_HOME>/config/skills`        ← cross-surface global
-        //   workspace  `<cwd>/.gemini/skills`
-        //   home       `<GEMINI_HOME>/antigravity-cli/skills` ← the CLI's, read too
-        //   workspace  `<cwd>/.agents/skills`
-        //
-        // Both home roots follow the resolved `GEMINI_HOME` on purpose: the
-        // server's own comment records that a `$HOME`-anchored entry here used
-        // to hand the real `~/.gemini` to the agent even when the home had
-        // been relocated. `config/skills` leads because it is the directory
-        // Antigravity itself calls the global one; `antigravity-cli/skills`
-        // belongs to the CLI and is only READ, so installs must not land
-        // there ahead of it.
-        //
-        // `SkillDirectoryOnly`: the discovery docstring says "SKILL.md files
-        // or skill subfolders", which does not distinguish a bundle's
-        // `<id>/SKILL.md` from a flat `<id>.md`, and the actual scan happens
-        // inside the Go harness. The directory bundle is the shape every agent
-        // supports, so codeg installs that rather than guessing at the wider
-        // one and writing skills the agent may never load.
+        // Install into the native CLI customization root; retain the shared
+        // Gemini root as a secondary discovery source for existing skills.
         AgentType::Antigravity => Some(SkillStorageSpec {
             kind: SkillStorageKind::SkillDirectoryOnly,
             global_dirs: vec![
-                crate::parsers::antigravity::resolve_antigravity_shared_config_dir().join("skills"),
                 crate::parsers::antigravity::resolve_antigravity_cli_dir().join("skills"),
+                crate::parsers::antigravity::resolve_antigravity_shared_config_dir().join("skills"),
             ],
             project_rel_dirs: vec![".gemini/skills", ".agents/skills"],
         }),
@@ -11463,18 +11409,10 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
             "QODER_PERSONAL_ACCESS_TOKEN",
             "QODER_MODEL",
         ),
-        // Antigravity's credential depends on the auth method the settings
-        // panel picked, and the panel writes the right one directly; the slot
-        // named here is the Gemini Developer API key, which is what
-        // `auth.type = "gemini-api-key"` reads (the server says so in its own
-        // `auth_required` message). `AGY_ACP_DEFAULT_MODEL` is real — it is
-        // the env the server's `get_default_model_id` consults before falling
-        // back to `gemini-3.8-flash-high` (`gemini-4-argon-high` for an Agent
-        // Platform session since 1.4.1). There is NO endpoint override, so
-        // the base-url slot stays an inert `AGY_BASE_URL` placeholder for the
-        // same reason `CURSOR_MODEL`/`QODER_BASE_URL` above are: it keeps the
-        // generic cascade off the `OPENAI_*` keys.
-        AgentType::Antigravity => ("AGY_BASE_URL", "GEMINI_API_KEY", "AGY_ACP_DEFAULT_MODEL"),
+        // The native CLI's Gemini-compatible endpoint and key. Model choices
+        // are reported over ACP; AGY_MODEL is an inert slot keeping the generic
+        // provider cascade away from OPENAI_* variables.
+        AgentType::Antigravity => ("GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY", "AGY_MODEL"),
         // `CLINE_API_KEY` is not just a convenience: it is one of only two ways
         // past cline's ACP auth gate (`isSessionReady`), and the only one a BYO
         // provider can take — see [`apply_cline_launch_env`]. `CLINE_MODEL`
@@ -12321,16 +12259,9 @@ fn cascade_update_agent_config(
             // no credentials for the cascade to reconcile.
         }
         AgentType::Antigravity => {
-            // Antigravity only ever talks to Google's own endpoints (CCPA for
-            // the consumer path, BAIC for Gemini Enterprise, the Gemini
-            // Developer API for a raw key), none of which accepts a custom
-            // base URL — so it stays off the model-provider credential
-            // cascade. Its credentials come from the auth method the settings
-            // panel recorded, which the launch path projects into the process
-            // env and into `antigravity-acp/settings.json` (see
-            // `sync_antigravity_settings_file`); that file carries the chosen
-            // METHOD, never a credential, so there is nothing here to
-            // reconcile either.
+            // Native agy reads credentials from the dedicated auth panel.
+            // Its settings contain only provider selection and project data;
+            // no credential is copied into that shared file.
         }
         AgentType::Kiro => {
             // Kiro signs in to its own service (`kiro-cli login`, or
@@ -24800,7 +24731,7 @@ model = "gpt"
             assert_eq!(file_name(agent).as_deref(), Some("AGENTS.md"), "{agent:?}");
         }
         let antigravity = agent_system_instructions_path(AgentType::Antigravity).unwrap();
-        assert!(antigravity.ends_with(".gemini/AGENTS.md"));
+        assert!(antigravity.ends_with(".gemini/antigravity-cli/AGENTS.md"));
         let kiro = agent_system_instructions_path(AgentType::Kiro).unwrap();
         assert!(kiro.ends_with("steering/AGENTS.md"));
         let cline = agent_system_instructions_path(AgentType::Cline).unwrap();
