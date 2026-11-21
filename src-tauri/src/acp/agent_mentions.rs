@@ -48,6 +48,37 @@ const ASSISTANT_BRIEF_FRAME_VERSION: u8 = 1;
 const ASSISTANT_BRIEF_LINE_PREFIX: &str = "Codeg assistant profile (authoritative): ";
 const MAX_ASSISTANT_BRIEF_FRAME_BYTES: usize = 256 * 1024;
 
+const GEMINI_TEMP_FRAME_KIND: &str = "codeg_internal_gemini_temp";
+const GEMINI_TEMP_FRAME_BODY_PREFIX: &str = "{\"kind\":\"codeg_internal_gemini_temp\"";
+const GEMINI_TEMP_FRAME_VERSION: u8 = 1;
+
+pub(crate) fn render_gemini_temp_contract() -> String {
+    let descriptor = FrameDescriptor::fresh(GEMINI_TEMP_FRAME_KIND, GEMINI_TEMP_FRAME_VERSION);
+    let body = render_gemini_temp_body(&descriptor);
+    format!("{ROUTE_FRAME_SEPARATOR}{body}{ROUTE_FRAME_SEPARATOR}")
+}
+
+// Keep exactly three newline-terminated lines for the shared transcript
+// sanitizer. Contract wording changes must bump GEMINI_TEMP_FRAME_VERSION.
+fn render_gemini_temp_body(descriptor: &FrameDescriptor) -> String {
+    let descriptor = serde_json::to_string(descriptor).expect("serializable descriptor");
+    format!(
+        "{descriptor}\nCodeg Gemini temporary artifact contract:\n{}\n",
+        crate::acp::gemini_runtime::TEMP_CONTRACT
+    )
+}
+
+fn accepts_gemini_temp_body(candidate: &str) -> bool {
+    let Some((line, _)) = candidate.split_once('\n') else {
+        return false;
+    };
+    let Ok(descriptor) = serde_json::from_str::<FrameDescriptor>(line) else {
+        return false;
+    };
+    descriptor.is(GEMINI_TEMP_FRAME_KIND, GEMINI_TEMP_FRAME_VERSION)
+        && render_gemini_temp_body(&descriptor) == candidate
+}
+
 /// Largest frame of any kind: the window the separated scan looks for a closing
 /// separator in.
 const MAX_INTERNAL_FRAME_BYTES: usize = MAX_ASSISTANT_BRIEF_FRAME_BYTES;
@@ -479,12 +510,14 @@ enum FrameKind {
     AgentRoutes,
     AssistantRoutes,
     AssistantBrief,
+    GeminiTemp,
 }
 
-const FRAME_KINDS: [FrameKind; 3] = [
+const FRAME_KINDS: [FrameKind; 4] = [
     FrameKind::AgentRoutes,
     FrameKind::AssistantRoutes,
     FrameKind::AssistantBrief,
+    FrameKind::GeminiTemp,
 ];
 
 impl FrameKind {
@@ -495,12 +528,15 @@ impl FrameKind {
             FrameKind::AgentRoutes => ROUTE_FRAME_BODY_PREFIX,
             FrameKind::AssistantRoutes => ASSISTANT_ROUTE_FRAME_BODY_PREFIX,
             FrameKind::AssistantBrief => ASSISTANT_BRIEF_FRAME_BODY_PREFIX,
+            FrameKind::GeminiTemp => GEMINI_TEMP_FRAME_BODY_PREFIX,
         }
     }
 
     fn max_bytes(self) -> usize {
         match self {
-            FrameKind::AgentRoutes | FrameKind::AssistantRoutes => MAX_ROUTE_FRAME_BYTES,
+            FrameKind::AgentRoutes | FrameKind::AssistantRoutes | FrameKind::GeminiTemp => {
+                MAX_ROUTE_FRAME_BYTES
+            }
             FrameKind::AssistantBrief => MAX_ASSISTANT_BRIEF_FRAME_BYTES,
         }
     }
@@ -512,6 +548,7 @@ impl FrameKind {
             FrameKind::AgentRoutes => parse_internal_agent_routes_body(body).is_some(),
             FrameKind::AssistantRoutes => parse_assistant_routes_body(body).is_some(),
             FrameKind::AssistantBrief => parse_assistant_brief_body(body).is_some(),
+            FrameKind::GeminiTemp => accepts_gemini_temp_body(body),
         }
     }
 }

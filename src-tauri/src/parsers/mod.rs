@@ -2169,6 +2169,48 @@ mod route_sanitizer_tests {
     }
 
     #[test]
+    fn gemini_temp_contract_never_surfaces_in_history() {
+        let task = "Inspect the generated screenshot";
+        let contract = crate::acp::agent_mentions::render_gemini_temp_contract();
+        let mut own_block = turn(TurnRole::User, task);
+        own_block.blocks.push(ContentBlock::Text {
+            text: contract.clone(),
+        });
+        for user in [
+            own_block,
+            turn(TurnRole::User, &format!("{task}\n\n{contract}")),
+            turn(
+                TurnRole::User,
+                &format!("{task}\n\n{}", contract.replace('\u{1e}', " ")),
+            ),
+        ] {
+            let detail = sanitized(Fixture {
+                summary: summary(Some(&format!("{task} {contract}")[..100]), 3),
+                turns: vec![
+                    user,
+                    turn(TurnRole::User, &contract),
+                    turn(TurnRole::Assistant, &contract),
+                ],
+            });
+            assert_eq!(detail.turns.len(), 2);
+            assert_eq!(detail.summary.message_count, 2);
+            assert_eq!(detail.summary.title.as_deref(), Some(task));
+            assert!(
+                matches!(&detail.turns[0].blocks[0], ContentBlock::Text { text } if text == task)
+            );
+            assert!(
+                matches!(&detail.turns[1].blocks[0], ContentBlock::Text { text } if text == &contract)
+            );
+        }
+        // Similar user-authored prose is never mistaken for a complete frame.
+        let prose = "{\"kind\":\"codeg_internal_gemini_temp\"} is a descriptor";
+        assert_eq!(
+            crate::acp::agent_mentions::strip_internal_frames(prose),
+            prose
+        );
+    }
+
+    #[test]
     fn assistant_turns_and_look_alike_user_prose_are_left_alone() {
         // Only a complete frame that re-renders byte-for-byte is removed, so
         // prose that merely resembles one stays verbatim, on both roles. The

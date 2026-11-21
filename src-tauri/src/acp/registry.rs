@@ -4508,7 +4508,9 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
                 // `session/request_permission`. Sandbox stays opt-in.
                 args: &["--acp", "--skip-trust", "--approval-mode=yolo"],
                 env: &[],
-                node_required: Some("20.0.0"),
+                // Codeg's launch-only module loader uses module.register,
+                // available from Node 20.6 (not 20.0).
+                node_required: Some("20.6.0"),
             },
         },
         AgentType::OpenClaw => AcpAgentMeta {

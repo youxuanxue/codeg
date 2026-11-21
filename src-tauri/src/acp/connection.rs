@@ -2242,6 +2242,15 @@ async fn build_agent(
     let agent = match meta.distribution {
         AgentDistribution::Npx { cmd, args, env, .. } => {
             let mut merged_env = merge_agent_env(env, runtime_env, scratch);
+            if agent_type == AgentType::Gemini {
+                crate::acp::gemini_runtime::prepare_launch(&mut merged_env, scratch).map_err(
+                    |error| {
+                        AcpError::protocol(format!(
+                            "Gemini temporary artifact compatibility setup failed: {error}"
+                        ))
+                    },
+                )?;
+            }
             let mut zcode_runtime = None;
             if agent_type == AgentType::ZCode {
                 let runtime = crate::acp::zcode::resolve_runtime(runtime_env, cwd)
@@ -13583,6 +13592,11 @@ fn prepare_agent_bound_prompt(
 ) -> Vec<ContentBlock> {
     append_agent_routes(&mut blocks, delegation_enabled);
     append_assistant_routes(&mut blocks, delegation_enabled);
+    if agent_type == AgentType::Gemini && !blocks.is_empty() {
+        blocks.push(PromptInputBlock::Text {
+            text: crate::acp::agent_mentions::render_gemini_temp_contract(),
+        });
+    }
     blocks.extend(internal_suffix);
     if agent_type == AgentType::Grok {
         blocks = normalize_grok_image_blocks(blocks);
@@ -34132,7 +34146,11 @@ mod tests {
             AgentType::custom("delegating-custom").expect("valid custom id"),
         ] {
             let prompt = prepare_agent_bound_prompt(parent, blocks.clone(), true, Vec::new());
-            assert_eq!(prompt.len(), 2, "{parent} must receive the routing block");
+            assert_eq!(
+                prompt.len(),
+                if parent == AgentType::Gemini { 3 } else { 2 },
+                "{parent} must receive routing and its agent-specific context"
+            );
             assert!(matches!(
                 &prompt[0],
                 ContentBlock::Text(text) if text.text == visible
@@ -34154,6 +34172,26 @@ mod tests {
             &unrouted[0],
             ContentBlock::Text(text) if text.text == visible
         ));
+    }
+
+    #[test]
+    fn gemini_temp_contract_reaches_new_and_resumed_prompts_without_changing_user_text() {
+        let input = vec![PromptInputBlock::Text {
+            text: "Render the PDF and inspect the PNG".to_string(),
+        }];
+        for _ in 0..2 {
+            let prompt =
+                prepare_agent_bound_prompt(AgentType::Gemini, input.clone(), false, vec![]);
+            assert!(
+                matches!(&prompt[0], ContentBlock::Text(t) if t.text == "Render the PDF and inspect the PNG")
+            );
+            assert!(matches!(&prompt[1], ContentBlock::Text(t)
+                if t.text.contains(crate::acp::gemini_runtime::TEMP_CONTRACT)
+                    && crate::acp::agent_mentions::strip_internal_frames(&t.text).is_empty()));
+        }
+        let other = prepare_agent_bound_prompt(AgentType::Codex, input, false, vec![]);
+        assert_eq!(other.len(), 1);
+        assert!(prepare_agent_bound_prompt(AgentType::Gemini, vec![], false, vec![]).is_empty());
     }
 
     #[test]
