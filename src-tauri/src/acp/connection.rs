@@ -1067,6 +1067,54 @@ fn codex_config_with_thread_unload_delay(current: Option<&str>) -> Option<String
     Some(serde_json::Value::Object(config).to_string())
 }
 
+/// Seed the adapter before session/new or session/resume. Replaying ACP
+/// selectors after establishment is too late: resume has already compared the
+/// saved model with the user's default and emitted a misleading warning.
+fn codex_launch_preferences(
+    agent_type: AgentType,
+    runtime_env: &mut BTreeMap<String, String>,
+    preferences: &BTreeMap<String, String>,
+    inherited_config: Option<&str>,
+) {
+    if agent_type != AgentType::Codex {
+        return;
+    }
+    let selected: Vec<_> = [
+        ("model", "model"),
+        ("reasoning_effort", "model_reasoning_effort"),
+    ]
+    .into_iter()
+    .filter_map(|(option, key)| {
+        preferences
+            .get(option)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (key, value))
+    })
+    .collect();
+    if selected.is_empty() {
+        return;
+    }
+    let current = runtime_env
+        .get(CODEX_CONFIG_ENV)
+        .map(String::as_str)
+        .or(inherited_config);
+    let mut config = match current.map(str::trim).filter(|v| !v.is_empty()) {
+        None => serde_json::Map::new(),
+        Some(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(serde_json::Value::Object(config)) => config,
+            // Preserve invalid user configuration for the adapter to diagnose.
+            _ => return,
+        },
+    };
+    for (key, value) in selected {
+        config.insert(key.to_string(), value.clone().into());
+    }
+    runtime_env.insert(
+        CODEX_CONFIG_ENV.to_string(),
+        serde_json::Value::Object(config).to_string(),
+    );
+}
+
 /// Codex-only launch policy: force codex-acp's MCP name-conflict de-duplication
 /// OFF. codeg injects its companion server (`codeg-mcp`) over ACP
 /// `session/new.mcpServers`; codex-acp otherwise drops any ACP-passed server
@@ -2745,6 +2793,13 @@ pub async fn spawn_agent_connection(
     terminal_shell_config: TerminalShellRuntimeConfig,
     cli_root: Option<crate::cli_run::RootSeed>,
 ) -> Result<tokio::sync::oneshot::Receiver<()>, AcpError> {
+    let mut runtime_env = runtime_env;
+    codex_launch_preferences(
+        agent_type,
+        &mut runtime_env,
+        &preferred_config_values,
+        std::env::var(CODEX_CONFIG_ENV).ok().as_deref(),
+    );
     // Use the same cwd for launch settings, the subprocess and session/new.
     let launch_cwd = resolve_working_dir(working_dir.as_deref());
     // Create the authoritative session state up front. Subsequent emit_with_state
@@ -32299,6 +32354,74 @@ mod tests {
             .filter(|(k, _)| k == "CODEX_CONFIG")
             .map(|(_, v)| serde_json::from_str(v).expect("CODEX_CONFIG is JSON"))
             .collect()
+    }
+
+    #[test]
+    fn codex_launch_preferences_seed_model_and_effort_before_establishment() {
+        let prefs = BTreeMap::from([
+            ("model".into(), "gpt-6.2-astra".into()),
+            ("reasoning_effort".into(), "high".into()),
+            ("mode".into(), "full-access".into()),
+        ]);
+        let inherited = r#"{"model":"gpt-6.1-sol","hooks":{"PreToolUse":[]}}"#;
+        let mut env = BTreeMap::new();
+        codex_launch_preferences(AgentType::Codex, &mut env, &prefs, Some(inherited));
+        let config: serde_json::Value = serde_json::from_str(&env[CODEX_CONFIG_ENV]).unwrap();
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "model": "gpt-6.2-astra", "model_reasoning_effort": "high",
+                "hooks": {"PreToolUse": []}
+            })
+        );
+        // Runtime overrides inherit nothing from Codeg's ambient config.
+        env.insert(CODEX_CONFIG_ENV.into(), r#"{"service_tier":"fast"}"#.into());
+        codex_launch_preferences(AgentType::Codex, &mut env, &prefs, Some(inherited));
+        let config: serde_json::Value = serde_json::from_str(&env[CODEX_CONFIG_ENV]).unwrap();
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "model": "gpt-6.2-astra", "model_reasoning_effort": "high", "service_tier": "fast"
+            })
+        );
+        // The existing launch policy still augments the seeded config.
+        let mut merged: Vec<_> = env.into_iter().collect();
+        apply_codex_env_policy(AgentType::Codex, &mut merged, None, None);
+        let config = &codex_config_of(&merged)[0];
+        assert_eq!(config["model"], "gpt-6.2-astra");
+        assert_eq!(config["model_reasoning_effort"], "high");
+        assert_eq!(config["thread_unload_delay_secs"], 60);
+    }
+
+    #[test]
+    fn codex_launch_preferences_preserve_unspecified_and_invalid_config() {
+        let prefs = BTreeMap::from([("model".into(), "gpt-6.2-astra".into())]);
+        for agent in [AgentType::ClaudeCode, AgentType::Grok] {
+            let mut env = BTreeMap::new();
+            codex_launch_preferences(agent, &mut env, &prefs, None);
+            assert_eq!(env, BTreeMap::new());
+        }
+        let original = BTreeMap::from([(CODEX_CONFIG_ENV.into(), "not json".into())]);
+        let mut env = original.clone();
+        codex_launch_preferences(AgentType::Codex, &mut env, &prefs, None);
+        assert_eq!(env, original);
+        for prefs in [
+            BTreeMap::new(),
+            BTreeMap::from([("model".into(), " ".into())]),
+        ] {
+            let mut env = BTreeMap::new();
+            codex_launch_preferences(AgentType::Codex, &mut env, &prefs, Some("{}"));
+            assert_eq!(env, BTreeMap::new());
+        }
+        let mut env = BTreeMap::new();
+        codex_launch_preferences(
+            AgentType::Codex,
+            &mut env,
+            &prefs,
+            Some(r#"{"model_reasoning_effort":"low"}"#),
+        );
+        let config: serde_json::Value = serde_json::from_str(&env[CODEX_CONFIG_ENV]).unwrap();
+        assert_eq!(config["model_reasoning_effort"], "low");
     }
 
     /// codex 0.164 holds a closed thread for 30 minutes; codeg's fork closes
