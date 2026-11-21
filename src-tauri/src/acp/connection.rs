@@ -519,7 +519,9 @@ fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> Ant
 /// launch removes `HOME`, or sets it to a relative path). Writing anyway would
 /// mean guessing, and a guess here creates a stray tree AND leaves the real
 /// `modelProvider` unwritten, so the sync reports the skip instead.
-fn antigravity_acp_dir_for_env(runtime_env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
+pub(crate) fn antigravity_acp_dir_for_env(
+    runtime_env: &BTreeMap<String, String>,
+) -> Result<PathBuf, String> {
     antigravity_acp_dir_with_inherited(runtime_env, std::env::var_os("GEMINI_HOME"))
 }
 
@@ -758,7 +760,7 @@ pub fn antigravity_effective_auth_type(
 ///
 /// `Ok(None)` means "no file, safe to create". `Err` means "do not touch it" —
 /// unreadable, not JSON codeg can parse, or not a JSON object.
-fn read_antigravity_settings(path: &Path) -> Result<Option<serde_json::Value>, String> {
+pub(crate) fn read_antigravity_settings(path: &Path) -> Result<Option<serde_json::Value>, String> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),

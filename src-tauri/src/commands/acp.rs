@@ -6832,11 +6832,20 @@ async fn antigravity_runtime_env(db: &AppDatabase) -> Result<BTreeMap<String, St
         .await
         .map_err(|e| AcpError::protocol(e.to_string()))?;
     let local_config_json = load_agent_local_config_json(AgentType::Antigravity);
-    Ok(build_runtime_env_from_setting(
+    let mut runtime_env = build_runtime_env_from_setting(
         AgentType::Antigravity,
         setting.as_ref(),
         local_config_json.as_deref(),
-    ))
+    );
+    apply_model_provider_env(
+        AgentType::Antigravity,
+        setting.as_ref(),
+        &mut runtime_env,
+        &db.conn,
+    )
+    .await;
+    apply_antigravity_cli_defaults(&mut runtime_env);
+    Ok(runtime_env)
 }
 
 /// Compatibility endpoint returning the native agy login instructions.
@@ -11760,6 +11769,52 @@ fn cc_switch_model_catalog_for(
     rows
 }
 
+/// Fill native agy's credential defaults after Codeg's provider overrides.
+/// Resolve the same root as `--gemini-dir`; Gemini CLI's GEMINI_CLI_HOME is
+/// unrelated. Explicit removals and inherited process values win over dotenv.
+fn apply_antigravity_cli_defaults(runtime_env: &mut BTreeMap<String, String>) {
+    use crate::acp::connection::{antigravity_acp_dir_for_env, read_antigravity_settings};
+
+    let Ok(acp_dir) = antigravity_acp_dir_for_env(runtime_env) else {
+        return;
+    };
+    let Some(root) = acp_dir.parent() else {
+        return;
+    };
+    let dotenv = std::fs::read_to_string(root.join(".env"))
+        .map(|raw| parse_dotenv_vars(&raw))
+        .unwrap_or_default();
+    for key in ["GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"] {
+        if !runtime_env.contains_key(key) {
+            let value = std::env::var(key).ok().or_else(|| dotenv.get(key).cloned());
+            if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+                runtime_env.insert(key.to_string(), value);
+            }
+        }
+    }
+    if runtime_env.contains_key("AGY_AUTH_METHOD")
+        || runtime_env
+            .get("GEMINI_API_KEY")
+            .is_none_or(|key| key.trim().is_empty())
+    {
+        return;
+    }
+    // A pre-existing native provider (including the empty OAuth provider)
+    // belongs to the CLI. Malformed settings must not be rewritten either.
+    let may_infer = match read_antigravity_settings(&acp_dir.join("settings.json")) {
+        Ok(None) => true,
+        Ok(Some(settings)) => match settings.get("modelProvider") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::String(provider)) => provider == "gemini",
+            _ => false,
+        },
+        Err(_) => false,
+    };
+    if may_infer {
+        runtime_env.insert("AGY_AUTH_METHOD".to_string(), "gemini-api-key".to_string());
+    }
+}
+
 fn load_gemini_dotenv_raw(runtime_env: &BTreeMap<String, String>) -> Option<String> {
     let env = crate::parsers::AgentEnv::from_overrides(runtime_env.clone());
     let path = crate::parsers::gemini::resolve_gemini_base_dir_for_env(&env).join(".env");
@@ -12491,6 +12546,9 @@ pub(crate) async fn build_runtime_env_for_agent(
     let mut runtime_env =
         build_runtime_env_from_setting(agent_type, setting.as_ref(), local_config_json.as_deref());
     apply_model_provider_env(agent_type, setting.as_ref(), &mut runtime_env, &db.conn).await;
+    if agent_type == AgentType::Antigravity {
+        apply_antigravity_cli_defaults(&mut runtime_env);
+    }
     if agent_type == AgentType::ClaudeCode {
         apply_claude_model_picker_env(setting.as_ref(), &mut runtime_env, &db.conn).await;
     }
@@ -25003,6 +25061,203 @@ model = "gpt"
                 "gpt-6",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn antigravity_runtime_inherits_cli_dotenv_without_native_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".gemini");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(".env"),
+            "GOOGLE_GEMINI_BASE_URL=https://gateway.example\nGEMINI_API_KEY=sk-from-cli\n",
+        )
+        .unwrap();
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        agent_setting_service::ensure_defaults(
+            &db.conn,
+            &[agent_setting_service::AgentDefaultInput {
+                agent_type: AgentType::Antigravity,
+                registry_id: "antigravity".into(),
+                default_sort_order: 0,
+            }],
+        )
+        .await
+        .unwrap();
+        let env_json = serde_json::json!({
+            "HOME": dir.path(), "GEMINI_HOME": "",
+            "GEMINI_CLI_HOME": dir.path().join("unrelated"),
+        })
+        .to_string();
+        agent_setting_service::update(
+            &db.conn,
+            AgentType::Antigravity,
+            agent_setting_service::AgentSettingsUpdate {
+                enabled: true,
+                env_json: Some(env_json.clone()),
+                model_provider_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let runtime = build_runtime_env_for_agent(&db, AgentType::Antigravity, None, dir.path(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.get("GEMINI_API_KEY").map(String::as_str),
+            Some("sk-from-cli")
+        );
+        assert_eq!(
+            runtime.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
+            Some("https://gateway.example")
+        );
+        assert_eq!(
+            runtime.get("AGY_AUTH_METHOD").map(String::as_str),
+            Some("gemini-api-key")
+        );
+        assert_eq!(
+            antigravity_runtime_env(&db)
+                .await
+                .unwrap()
+                .get("AGY_AUTH_METHOD"),
+            runtime.get("AGY_AUTH_METHOD")
+        );
+
+        // Provider binding must precede auth inference, even without dotenv.
+        std::fs::remove_file(root.join(".env")).unwrap();
+        let provider = model_provider_service::create(
+            &db.conn,
+            "TokenKey".into(),
+            "https://bound.example".into(),
+            "sk-bound".into(),
+            "antigravity".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        agent_setting_service::update(
+            &db.conn,
+            AgentType::Antigravity,
+            agent_setting_service::AgentSettingsUpdate {
+                enabled: true,
+                env_json: Some(env_json),
+                model_provider_id: Some(provider.id),
+            },
+        )
+        .await
+        .unwrap();
+        let runtime = build_runtime_env_for_agent(&db, AgentType::Antigravity, None, dir.path(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.get("GEMINI_API_KEY").map(String::as_str),
+            Some("sk-bound")
+        );
+        assert_eq!(
+            runtime.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
+            Some("https://bound.example")
+        );
+        assert_eq!(
+            runtime.get("AGY_AUTH_METHOD").map(String::as_str),
+            Some("gemini-api-key")
+        );
+        let panel = antigravity_runtime_env(&db).await.unwrap();
+        for key in [
+            "GEMINI_API_KEY",
+            "GOOGLE_GEMINI_BASE_URL",
+            "AGY_AUTH_METHOD",
+        ] {
+            assert_eq!(panel.get(key), runtime.get(key));
+        }
+    }
+
+    #[test]
+    fn antigravity_cli_defaults_respect_native_root_and_explicit_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("relocated");
+        std::fs::create_dir_all(root.join("antigravity-cli")).unwrap();
+        std::fs::write(
+            root.join(".env"),
+            "GEMINI_API_KEY=sk-dotenv\nGOOGLE_GEMINI_BASE_URL=https://dotenv.example\n",
+        )
+        .unwrap();
+        let env = BTreeMap::from([
+            ("HOME".into(), dir.path().to_string_lossy().into_owned()),
+            ("GEMINI_HOME".into(), "~/relocated".into()),
+            (
+                "GEMINI_CLI_HOME".into(),
+                dir.path().join("wrong").to_string_lossy().into_owned(),
+            ),
+            ("GEMINI_API_KEY".into(), "sk-explicit".into()),
+            (
+                "GOOGLE_GEMINI_BASE_URL".into(),
+                "https://explicit.example".into(),
+            ),
+        ]);
+        let mut runtime = env.clone();
+        apply_antigravity_cli_defaults(&mut runtime);
+        assert_eq!(
+            runtime.get("AGY_AUTH_METHOD").map(String::as_str),
+            Some("gemini-api-key")
+        );
+        for key in ["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"] {
+            assert_eq!(runtime.get(key), env.get(key));
+        }
+        let mut relocated = env.clone();
+        relocated.remove("GEMINI_API_KEY");
+        relocated.remove("GOOGLE_GEMINI_BASE_URL");
+        apply_antigravity_cli_defaults(&mut relocated);
+        assert_eq!(
+            relocated.get("GEMINI_API_KEY").map(String::as_str),
+            Some("sk-dotenv")
+        );
+        assert_eq!(
+            relocated.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
+            Some("https://dotenv.example")
+        );
+        runtime.insert("AGY_AUTH_METHOD".into(), "oauth-personal".into());
+        apply_antigravity_cli_defaults(&mut runtime);
+        assert_eq!(
+            runtime.get("AGY_AUTH_METHOD").map(String::as_str),
+            Some("oauth-personal")
+        );
+
+        let mut runtime = build_runtime_env_from_setting(AgentType::Antigravity, None, None);
+        runtime.extend(env.clone());
+        runtime.insert("GEMINI_API_KEY".into(), String::new());
+        apply_antigravity_cli_defaults(&mut runtime);
+        assert_eq!(runtime.get("GEMINI_API_KEY").map(String::as_str), Some(""));
+        assert_eq!(runtime.get("AGY_AUTH_METHOD"), None);
+
+        let settings = root.join("antigravity-cli/settings.json");
+        for raw in [
+            r#"{"modelProvider":""}"#,
+            r#"{"modelProvider":"vertex"}"#,
+            "broken",
+            "[]",
+        ] {
+            std::fs::write(&settings, raw).unwrap();
+            let mut runtime = env.clone();
+            apply_antigravity_cli_defaults(&mut runtime);
+            assert_eq!(runtime.get("AGY_AUTH_METHOD"), None, "{raw}");
+            assert_eq!(std::fs::read_to_string(&settings).unwrap(), raw);
+        }
+        for raw in ["{}", r#"{"modelProvider":"gemini"}"#] {
+            std::fs::write(&settings, raw).unwrap();
+            let mut runtime = env.clone();
+            apply_antigravity_cli_defaults(&mut runtime);
+            assert_eq!(
+                runtime.get("AGY_AUTH_METHOD").map(String::as_str),
+                Some("gemini-api-key")
+            );
+        }
+        let mut runtime = env;
+        runtime.insert("GEMINI_HOME".into(), "".into());
+        runtime.insert("HOME".into(), "".into());
+        runtime.remove("GEMINI_API_KEY");
+        apply_antigravity_cli_defaults(&mut runtime);
+        assert_eq!(runtime.get("GEMINI_API_KEY"), None);
+        assert_eq!(runtime.get("AGY_AUTH_METHOD"), None);
     }
 
     #[test]
