@@ -11574,6 +11574,37 @@ pub(crate) fn build_runtime_env_from_setting(
         }
     }
 
+    // `agy` loads Gemini's dotenv file itself when launched from a terminal.
+    // Codeg starts `agy acp` with a sanitized child environment, so mirror the
+    // same credentials here. Explicit Codeg settings win over the dotenv file;
+    // the file only fills values that were not configured in the panel.
+    // Selecting the API-key auth method is necessary because native ACP
+    // otherwise defaults to OAuth and rejects an otherwise valid API key.
+    if agent_type == AgentType::Antigravity {
+        let dotenv = load_gemini_dotenv_raw(&merged)
+            .map(|raw| parse_dotenv_vars(&raw))
+            .unwrap_or_default();
+        for key in ["GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"] {
+            if !merged.contains_key(key) {
+                if let Some(value) = dotenv
+                    .get(key)
+                    .map(String::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    merged.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+        if !merged.contains_key("AGY_AUTH_METHOD")
+            && merged
+                .get("GEMINI_API_KEY")
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            merged.insert("AGY_AUTH_METHOD".to_string(), "gemini-api-key".to_string());
+        }
+    }
+
     // Cline needs one key the generic trio has no slot for — the provider id —
     // and without it the launch env cannot clear the agent's auth gate.
     if agent_type == AgentType::Cline {
@@ -25003,6 +25034,34 @@ model = "gpt"
                 "gpt-6",
             ]
         );
+    }
+
+    #[test]
+    fn antigravity_runtime_inherits_gemini_cli_dotenv_credentials() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gemini_home = dir.path().join("home");
+        let gemini_dir = gemini_home.join(".gemini");
+        std::fs::create_dir_all(&gemini_dir).expect("create gemini dir");
+        std::fs::write(
+            gemini_dir.join(".env"),
+            "GOOGLE_GEMINI_BASE_URL=https://gateway.example\nGEMINI_API_KEY=sk-from-cli\n",
+        )
+        .expect("write .env");
+
+        let runtime = build_runtime_env_from_setting(
+            AgentType::Antigravity,
+            None,
+            Some(&format!(
+                r#"{{"env":{{"GEMINI_CLI_HOME":"{}"}}}}"#,
+                gemini_home.display()
+            )),
+        );
+        assert_eq!(runtime.get("GEMINI_API_KEY").map(String::as_str), Some("sk-from-cli"));
+        assert_eq!(
+            runtime.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
+            Some("https://gateway.example")
+        );
+        assert_eq!(runtime.get("AGY_AUTH_METHOD").map(String::as_str), Some("gemini-api-key"));
     }
 
     #[test]
