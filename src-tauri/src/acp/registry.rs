@@ -4508,7 +4508,9 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
                 // `session/request_permission`. Sandbox stays opt-in.
                 args: &["--acp", "--skip-trust", "--approval-mode=yolo"],
                 env: &[],
-                node_required: Some("20.0.0"),
+                // Codeg's launch-only module loader uses module.register,
+                // available from Node 20.6 (not 20.0).
+                node_required: Some("20.6.0"),
             },
         },
         AgentType::OpenClaw => AcpAgentMeta {
@@ -8157,7 +8159,7 @@ mod tests {
             AgentType::Gemini,
             "0.60.0",
             "@google/gemini-cli@0.60.0",
-            Some("20.0.0"),
+            Some("20.6.0"),
         );
         // OpenClaw's floor is a RUNTIME gate (`node-version.mjs`), not just
         // `engines` metadata: 2026.9.3 retired the Node 22 lane and 2026.9.8
