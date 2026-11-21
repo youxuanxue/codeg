@@ -2600,6 +2600,7 @@ export interface ForgeAutoScanReport {
     started: boolean
     start_error: string | null
   }[]
+  reused?: ForgeAutoScanReport["created"]
   failed: { number: number; is_pr: boolean; error: string }[]
   skipped: Partial<Record<ForgeAutoSkip, number>>
   /** The listing hit its page bound; the next scan re-reads the same window. */

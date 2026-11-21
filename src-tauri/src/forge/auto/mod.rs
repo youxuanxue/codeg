@@ -1,6 +1,6 @@
 //! Auto-processing for the repository panel: a repository is scanned on a
 //! schedule, or as soon as its forge sends a webhook, and every open item the
-//! folder's rules match — and that has never had a task — becomes one.
+//! folder's rules match gets a task, or continues its unfinished sticky task.
 //!
 //! What it is configured by lives in `settings::ForgeAutoSettings` (scoped like
 //! the rest of the panel's settings); which items match is `rules`; what a
@@ -169,6 +169,7 @@ pub struct ScanReport {
     /// Of those, the ones that already have — or once had — a task.
     pub already_handled: usize,
     pub created: Vec<CreatedItem>,
+    pub reused: Vec<CreatedItem>,
     pub failed: Vec<FailedItem>,
     /// Items passed over, by the first rule that ruled each one out.
     pub skipped: BTreeMap<rules::Skip, usize>,
@@ -190,6 +191,7 @@ impl ScanReport {
             matched: 0,
             already_handled: 0,
             created: Vec::new(),
+            reused: Vec::new(),
             failed: Vec::new(),
             skipped: BTreeMap::new(),
             truncated: false,
@@ -582,26 +584,12 @@ impl AutoProcessor {
             .filter(|(_, _, sticky)| !sticky)
             .map(|(key, _, _)| key.clone())
             .collect();
-        let sticky_keys: Vec<String> = keyed
-            .iter()
-            .filter(|(_, _, sticky)| *sticky)
-            .map(|(key, _, _)| key.clone())
-            .collect();
         let handled = work_task_service::source_keys_ever_tasked(&self.db.conn, &ordinary_keys)
-            .await
-            .map_err(|e| format!("the task board could not be read: {e}"))?;
-        let active_sticky = work_task_service::source_keys_active(&self.db.conn, &sticky_keys)
             .await
             .map_err(|e| format!("the task board could not be read: {e}"))?;
         let mut fresh: Vec<ForgeIssueRow> = keyed
             .into_iter()
-            .filter(|(key, _, sticky)| {
-                if *sticky {
-                    !active_sticky.contains(key)
-                } else {
-                    !handled.contains(key)
-                }
-            })
+            .filter(|(key, _, sticky)| *sticky || !handled.contains(key))
             .map(|(_, row, _)| row)
             .collect();
         report.already_handled = keys.len() - fresh.len();
@@ -623,15 +611,20 @@ impl AutoProcessor {
                 &self.db,
                 draft,
                 if rules::is_sticky(&row) {
-                    ForgeTaskOrigin::AutoSticky(trigger)
+                    ForgeTaskOrigin::AutoSticky {
+                        trigger,
+                        auto_start: auto.auto_start,
+                    }
                 } else {
                     ForgeTaskOrigin::Auto(trigger)
                 },
             )
             .await
             {
-                Ok(ForgeCreateResult::Created { task }) => {
-                    let (started, start_error) = if auto.auto_start {
+                Ok(ForgeCreateResult::Created { task, reused }) => {
+                    let (started, start_error) = if reused {
+                        (true, None)
+                    } else if auto.auto_start {
                         match start_task(&self.db, task.id).await {
                             Ok(()) => (true, None),
                             Err(e) => (false, Some(e)),
@@ -639,7 +632,12 @@ impl AutoProcessor {
                     } else {
                         (false, None)
                     };
-                    report.created.push(CreatedItem {
+                    let items = if reused {
+                        &mut report.reused
+                    } else {
+                        &mut report.created
+                    };
+                    items.push(CreatedItem {
                         number: row.number,
                         is_pr: row.is_pr,
                         title: row.title.clone(),

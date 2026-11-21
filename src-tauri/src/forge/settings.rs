@@ -128,10 +128,10 @@ impl Default for ForgePanelSettings {
 /// delivery that never arrived.
 ///
 /// **What it picks up** is decided by the rules below, evaluated against each
-/// OPEN item. Every item is handled at most once: an item that has ever had a
-/// task — finished, canceled or deleted included — is never picked up again,
-/// so dismissing an automatic task is a decision that sticks. Starting another
-/// one by hand stays possible from the panel.
+/// OPEN item. Ordinary items are handled at most once, including after a
+/// task is finished, canceled or deleted. Sticky issues continue their latest
+/// unfinished task on each scan and start a new card only after completion;
+/// cancel/delete/defer decisions stay respected. Manual triggers stay possible.
 ///
 /// **From when** is `enabled_at`, unless `include_existing` says otherwise: an
 /// item is picked up only once it is opened or updated AFTER auto-processing

@@ -541,6 +541,8 @@ pub async fn create(
 pub enum ForgeCreateOutcome {
     /// Boxed: the row dwarfs the conflict list beside it.
     Created(Box<WorkTaskInfo>),
+    /// A sticky scan queued the existing task for another generation.
+    Reused(Box<WorkTaskInfo>),
     /// Every item of the new task that a live task already handles, in the
     /// new task's own order, each with the newest such task. Never empty; a
     /// task triggered from one item has exactly one entry.
@@ -576,7 +578,7 @@ pub async fn create_from_forge(
     source: crate::models::WorkTaskSource,
     force: bool,
 ) -> Result<ForgeCreateOutcome, DbError> {
-    create_from_forge_by(conn, draft, source, force, None, false).await
+    create_from_forge_by(conn, draft, source, force, None, None).await
 }
 
 /// [`create_from_forge`], saying who asked: `auto_trigger = None` is a person
@@ -590,7 +592,7 @@ pub async fn create_from_forge_by(
     source: crate::models::WorkTaskSource,
     force: bool,
     auto_trigger: Option<&str>,
-    recurring: bool,
+    recurring: Option<bool>,
 ) -> Result<ForgeCreateOutcome, DbError> {
     validate_draft(&draft)?;
     let folder = folder::Entity::find_by_id(draft.folder_id)
@@ -615,12 +617,82 @@ pub async fn create_from_forge_by(
         .unwrap_or(0);
 
     let txn = conn.begin().await?;
-    // FIRST statement: the write. See the doc comment — this is load-bearing.
+    if let Some(auto_start) = recurring.filter(|_| !force) {
+        // Take SQLite's write lock BEFORE reading history, including when this
+        // scan reuses or skips a card rather than inserting one.
+        work_task::Entity::update_many()
+            .col_expr(
+                work_task::Column::Id,
+                Expr::col(work_task::Column::Id).into(),
+            )
+            .filter(work_task::Column::Id.eq(-1))
+            .exec(&txn)
+            .await?;
+        let keys: Vec<String> = source.keys().cloned().collect();
+        let mut existing = other_tasks_for_keys(&txn, -1, &keys, SourceTaskScope::Pending).await?;
+        if existing.is_empty() {
+            existing = other_tasks_for_keys(&txn, -1, &keys, SourceTaskScope::History).await?;
+        }
+        if let Some((key, task)) = existing.into_iter().next() {
+            let reusable = task.folder_id == draft.folder_id
+                && task.deleted_at.is_none()
+                && task.archived_at.is_none()
+                && task.deferred_at.is_none()
+                && task.scheduled_at.is_none()
+                && task.pending_merge.is_none()
+                && matches!(task.status, WorkTaskStatus::Review | WorkTaskStatus::Failed);
+            if reusable && auto_start {
+                // Refresh the order, not the workspace or session. The pump
+                // resolves current folder model settings when it launches.
+                let mut refreshed = task.clone().into_active_model();
+                refreshed.title = Set(draft.title.trim().to_string());
+                refreshed.config = Set(config_str);
+                refreshed.source_meta = Set(Some(
+                    serde_json::to_string(&source.meta)
+                        .map_err(|e| DbError::Validation(e.to_string()))?,
+                ));
+                refreshed.update(&txn).await?;
+                // The pending check above is the recurring guard. Older review
+                // cards from pre-reuse scans must not prevent this continuation.
+                claim_in_transaction(
+                    &txn,
+                    task.id,
+                    task.status,
+                    "auto",
+                    Some(serde_json::json!({ "action": "forge_scan", "trigger": auto_trigger })),
+                    true,
+                    true,
+                )
+                .await?
+                .ok_or_else(|| DbError::Validation("sticky task changed during scan".into()))?;
+                let reused = work_task::Entity::find_by_id(task.id)
+                    .one(&txn)
+                    .await?
+                    .ok_or_else(|| DbError::NotFound(format!("work task {}", task.id)))?;
+                txn.commit().await?;
+                return Ok(ForgeCreateOutcome::Reused(Box::new(to_info(reused))));
+            }
+            // Only a completed cycle permits a new card. User decisions such
+            // as cancel/delete/defer stay respected on every later scan.
+            if task.status != WorkTaskStatus::Done
+                || task.deleted_at.is_some()
+                || task.archived_at.is_some()
+                || task.folder_id != draft.folder_id
+            {
+                txn.rollback().await?;
+                return Ok(ForgeCreateOutcome::Duplicate(vec![SourceConflict {
+                    key,
+                    existing: to_info(task),
+                }]));
+            }
+        }
+    }
+    // Ordinary creates also acquire the write lock before their dedup read.
     let row = insert_todo_row(&txn, &draft, config_str, max_order, now, Some(&source)).await?;
     if !force {
         let keys: Vec<String> = source.keys().cloned().collect();
-        let scope = if recurring {
-            SourceTaskScope::Recurring
+        let scope = if recurring.is_some() {
+            SourceTaskScope::Pending
         } else if auto_trigger.is_some() {
             SourceTaskScope::History
         } else {
@@ -687,27 +759,12 @@ pub async fn source_keys_ever_tasked(
     Ok(found)
 }
 
-/// Sticky issues wait for pending/executing tasks, but agent-complete review
-/// cards do not block the next scan. The transactional create uses the same
-/// exception; ordinary creates and resurrection guards retain their policy.
-pub async fn source_keys_active(
-    conn: &DatabaseConnection,
-    keys: &[String],
-) -> Result<std::collections::HashSet<String>, DbError> {
-    Ok(other_tasks_for_keys(conn, -1, keys, SourceTaskScope::Recurring)
-        .await?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect())
-}
-
 /// How many keys one `IN (…)` carries — far below SQLite's bound-parameter
 /// limit, whatever a caller hands in.
 const KEY_CHUNK: usize = 500;
 
-/// Default active set for manual creates and resurrection guards. Recurring
-/// scans exclude Review through other_tasks_for_keys: the agent finished that
-/// cycle even while its result is waiting for human review.
+/// Default active set for manual creates and resurrection guards. Sticky
+/// scans wait for pending work and continue settled review/failed cards.
 pub const ACTIVE_STATUSES: [WorkTaskStatus; 7] = [
     WorkTaskStatus::Todo,
     WorkTaskStatus::Queued,
@@ -758,7 +815,7 @@ pub async fn other_active_for_keys<C: ConnectionTrait>(
 #[derive(Clone, Copy)]
 enum SourceTaskScope {
     Active,
-    Recurring,
+    Pending,
     History,
 }
 
@@ -782,7 +839,7 @@ async fn other_tasks_for_keys<C: ConnectionTrait>(
                 .filter(work_task::Column::DeletedAt.is_null())
                 .filter(work_task::Column::Status.is_in(ACTIVE_STATUSES));
         }
-        if matches!(scope, SourceTaskScope::Recurring) {
+        if matches!(scope, SourceTaskScope::Pending) {
             query = query.filter(work_task::Column::Status.ne(WorkTaskStatus::Review));
         }
         let rows = query.all(conn).await?;
@@ -1134,8 +1191,31 @@ async fn claim_inner(
     only_unplanned: bool,
     allow_duplicate_source: bool,
 ) -> Result<Option<i32>, DbError> {
-    let now = Utc::now();
     let txn = conn.begin().await?;
+    let result = claim_in_transaction(
+        &txn,
+        id,
+        from,
+        actor,
+        action,
+        only_unplanned,
+        allow_duplicate_source,
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(result)
+}
+
+async fn claim_in_transaction<C: ConnectionTrait>(
+    txn: &C,
+    id: i32,
+    from: WorkTaskStatus,
+    actor: &str,
+    action: Option<serde_json::Value>,
+    only_unplanned: bool,
+    allow_duplicate_source: bool,
+) -> Result<Option<i32>, DbError> {
+    let now = Utc::now();
     let mut update = work_task::Entity::update_many()
         .col_expr(
             work_task::Column::Status,
@@ -1178,13 +1258,12 @@ async fn claim_inner(
     if only_unplanned {
         update = update.filter(work_task::Column::ScheduledAt.is_null());
     }
-    let res = update.exec(&txn).await?;
+    let res = update.exec(txn).await?;
     if res.rows_affected != 1 {
-        txn.rollback().await?;
         return Ok(None);
     }
     let claimed = work_task::Entity::find_by_id(id)
-        .one(&txn)
+        .one(txn)
         .await?
         .ok_or_else(|| DbError::NotFound(format!("work task {id}")))?;
     // Resurrection guard, inside the SAME transaction as the winning CAS: a
@@ -1192,11 +1271,9 @@ async fn claim_inner(
     // active task already handles the same work item ("trigger a replacement,
     // then requeue the old card" would end with two live tasks on one issue).
     // The user can waive it explicitly per claim.
-    if matches!(from, WorkTaskStatus::Failed | WorkTaskStatus::Canceled)
-        && !allow_duplicate_source
+    if matches!(from, WorkTaskStatus::Failed | WorkTaskStatus::Canceled) && !allow_duplicate_source
     {
-        if let Some(other) = other_active_for_task(&txn, id).await? {
-            txn.rollback().await?;
+        if let Some(other) = other_active_for_task(txn, id).await? {
             return Err(duplicate_active_source_error(&other));
         }
     }
@@ -1208,10 +1285,9 @@ async fn claim_inner(
         if let serde_json::Value::Object(map) = &mut action {
             map.insert("run_seq".to_string(), serde_json::json!(run_seq));
         }
-        record_event(&txn, id, "user_action", actor, Some(action)).await?;
+        record_event(txn, id, "user_action", actor, Some(action)).await?;
     }
-    status_changed_event(&txn, id, actor, Some(from), WorkTaskStatus::Queued, None).await?;
-    txn.commit().await?;
+    status_changed_event(txn, id, actor, Some(from), WorkTaskStatus::Queued, None).await?;
     Ok(Some(run_seq))
 }
 
@@ -5741,7 +5817,7 @@ mod tests {
                     source(key),
                     false,
                     Some("manual"),
-                    false,
+                    None,
                 )
                 .await
                 .unwrap()
@@ -5771,8 +5847,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recurring_create_ignores_reviews_but_serializes_pending_work() {
-        let db = fresh_in_memory_db().await;
+    async fn recurring_scan_reuses_review_once_under_concurrent_scans() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::test_helpers::fresh_disk_db(dir.path()).await;
         let folder = seed_folder(&db, "/tmp/recurring-forge").await;
         let key = "github:github.com:acme/app:issue:123";
         let first = match create_from_forge(&db.conn, draft(folder, "first"), source(key), false)
@@ -5798,7 +5875,7 @@ mod tests {
                 .unwrap(),
             ForgeCreateOutcome::Duplicate(_)
         ));
-        // Two scanners racing on the same sticky issue create one replacement.
+        // Two scanners racing on the same sticky issue queue one continuation.
         let (a, b) = tokio::join!(
             create_from_forge_by(
                 &db.conn,
@@ -5806,7 +5883,7 @@ mod tests {
                 source(key),
                 false,
                 Some("manual"),
-                true
+                Some(true)
             ),
             create_from_forge_by(
                 &db.conn,
@@ -5814,14 +5891,14 @@ mod tests {
                 source(key),
                 false,
                 Some("manual"),
-                true
+                Some(true)
             ),
         );
         let outcomes = [a.unwrap(), b.unwrap()];
         assert_eq!(
             outcomes
                 .iter()
-                .filter(|r| matches!(r, ForgeCreateOutcome::Created(_)))
+                .filter(|r| matches!(r, ForgeCreateOutcome::Reused(_)))
                 .count(),
             1
         );
@@ -5832,8 +5909,179 @@ mod tests {
                 .count(),
             1
         );
-        let active = source_keys_active(&db.conn, &[key.into()]).await.unwrap();
-        assert!(active.contains(key));
+        let current = get_model(&db.conn, first.id).await.unwrap();
+        assert_eq!(current.status, WorkTaskStatus::Queued);
+        assert_eq!(current.run_seq, 1);
+        assert_eq!(list(&db.conn, Some(folder)).await.unwrap().len(), 1);
+        let events = recent_events_of_kinds(&db.conn, first.id, &["user_action"], 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload.as_ref().unwrap()["action"], "forge_scan");
+    }
+
+    #[tokio::test]
+    async fn sticky_scan_preserves_work_and_respects_user_decisions() {
+        for (status, decision, auto_start, expected) in [
+            (WorkTaskStatus::Review, "", true, "reused"),
+            (WorkTaskStatus::Failed, "", true, "reused"),
+            (WorkTaskStatus::Done, "", true, "created"),
+            (WorkTaskStatus::Canceled, "", true, "skipped"),
+            (WorkTaskStatus::Review, "deferred", true, "skipped"),
+            (WorkTaskStatus::Failed, "archived", true, "skipped"),
+            (WorkTaskStatus::Review, "deleted", true, "skipped"),
+            (WorkTaskStatus::Done, "deleted", true, "skipped"),
+            (WorkTaskStatus::Review, "merge", true, "skipped"),
+            (WorkTaskStatus::Review, "", false, "skipped"),
+            (WorkTaskStatus::Todo, "", true, "skipped"),
+            (WorkTaskStatus::Queued, "", true, "skipped"),
+            (WorkTaskStatus::Preparing, "", true, "skipped"),
+            (WorkTaskStatus::Running, "", true, "skipped"),
+            (WorkTaskStatus::AwaitingInput, "", true, "skipped"),
+            (WorkTaskStatus::Merging, "", true, "skipped"),
+        ] {
+            let db = fresh_in_memory_db().await;
+            let folder = seed_folder(&db, "/tmp/sticky-lifecycle").await;
+            let key = "github:github.com:acme/app:issue:3329";
+            let ForgeCreateOutcome::Created(first) =
+                create_from_forge(&db.conn, draft(folder, "old order"), source(key), false)
+                    .await
+                    .unwrap()
+            else {
+                panic!("created")
+            };
+            let mut row = get_model(&db.conn, first.id)
+                .await
+                .unwrap()
+                .into_active_model();
+            row.status = Set(status);
+            row.work_branch = Set(Some("chore/existing-work".into()));
+            row.base_sha = Set(Some("old-base".into()));
+            row.run_seq = Set(7);
+            row.result_summary = Set(Some("already implemented, awaiting PR review".into()));
+            match decision {
+                "deferred" => row.deferred_at = Set(Some(Utc::now())),
+                "archived" => row.archived_at = Set(Some(Utc::now())),
+                "deleted" => row.deleted_at = Set(Some(Utc::now())),
+                "merge" => row.pending_merge = Set(Some("{}".into())),
+                _ => (),
+            }
+            row.update(&db.conn).await.unwrap();
+            let result = create_from_forge_by(
+                &db.conn,
+                draft(folder, "refreshed order"),
+                source(key),
+                false,
+                Some("schedule"),
+                Some(auto_start),
+            )
+            .await
+            .unwrap();
+            match (expected, result) {
+                ("reused", ForgeCreateOutcome::Reused(task)) => {
+                    assert_eq!(task.id, first.id);
+                    assert_eq!(task.status, WorkTaskStatus::Queued);
+                    assert_eq!(task.run_seq, 8);
+                    assert_eq!(task.title, "refreshed order");
+                    assert_eq!(task.work_branch.as_deref(), Some("chore/existing-work"));
+                    assert_eq!(task.base_sha.as_deref(), Some("old-base"));
+                    assert_eq!(
+                        task.result_summary.as_deref(),
+                        Some("already implemented, awaiting PR review")
+                    );
+                }
+                ("created", ForgeCreateOutcome::Created(task)) => assert_ne!(task.id, first.id),
+                ("skipped", ForgeCreateOutcome::Duplicate(conflicts)) => {
+                    assert_eq!(conflicts[0].existing.id, first.id);
+                    let old = work_task::Entity::find_by_id(first.id)
+                        .one(&db.conn)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(old.status, status);
+                    assert_eq!(old.run_seq, 7);
+                    assert_eq!(old.title, "old order");
+                }
+                (_, result) => panic!("{status:?}/{decision}/{auto_start}: {result:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sticky_scan_selects_latest_card_but_waits_for_older_running_work() {
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/sticky-legacy").await;
+        let key = "github:github.com:acme/app:issue:2899";
+        let mut ids = Vec::new();
+        for title in ["old review", "latest review"] {
+            let ForgeCreateOutcome::Created(task) =
+                create_from_forge(&db.conn, draft(folder, title), source(key), true)
+                    .await
+                    .unwrap()
+            else {
+                panic!("created")
+            };
+            work_task::Entity::update_many()
+                .col_expr(
+                    work_task::Column::Status,
+                    Expr::value(WorkTaskStatus::Review),
+                )
+                .filter(work_task::Column::Id.eq(task.id))
+                .exec(&db.conn)
+                .await
+                .unwrap();
+            ids.push(task.id);
+        }
+        let result = create_from_forge_by(
+            &db.conn,
+            draft(folder, "next scan"),
+            source(key),
+            false,
+            Some("schedule"),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let ForgeCreateOutcome::Reused(task) = result else {
+            panic!("reused")
+        };
+        assert_eq!(task.id, ids[1]);
+        assert_eq!(
+            get_model(&db.conn, ids[0]).await.unwrap().status,
+            WorkTaskStatus::Review
+        );
+        // An older live generation still owns the issue, regardless of which
+        // historical card happens to have the latest timestamp.
+        work_task::Entity::update_many()
+            .col_expr(
+                work_task::Column::Status,
+                Expr::value(WorkTaskStatus::Running),
+            )
+            .filter(work_task::Column::Id.eq(ids[0]))
+            .exec(&db.conn)
+            .await
+            .unwrap();
+        work_task::Entity::update_many()
+            .col_expr(
+                work_task::Column::Status,
+                Expr::value(WorkTaskStatus::Review),
+            )
+            .filter(work_task::Column::Id.eq(ids[1]))
+            .exec(&db.conn)
+            .await
+            .unwrap();
+        let result = create_from_forge_by(
+            &db.conn,
+            draft(folder, "wait"),
+            source(key),
+            false,
+            Some("schedule"),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, ForgeCreateOutcome::Duplicate(_)));
+        assert_eq!(get_model(&db.conn, ids[1]).await.unwrap().run_seq, 1);
     }
 
     /// A finished task is history, not a blocker: dedup only counts the
@@ -5971,6 +6219,7 @@ mod tests {
         for handle in handles {
             match handle.await.expect("join").expect("no lock error") {
                 ForgeCreateOutcome::Created(_) => created += 1,
+                ForgeCreateOutcome::Reused(_) => panic!("manual creates cannot reuse"),
                 ForgeCreateOutcome::Duplicate(_) => duplicate += 1,
             }
         }
