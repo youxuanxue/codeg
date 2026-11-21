@@ -3239,21 +3239,12 @@ fn remove_qoder_server_at(path: &Path, id: &str) -> Result<bool, AppCommandError
 // ---------------------------------------------------------------------------
 // Google Antigravity  (<GEMINI_HOME>/config/mcp_config.json → `mcpServers`)
 //
-// The ACP server reads `<home>/config/mcp_config.json` at session setup
-// (`acp_server/mcp_servers.py::load_global_mcp_configs`). That file is the
-// CROSS-SURFACE one: Antigravity Desktop and the Antigravity CLI read the same
-// path, which is why it lives under `config/` rather than the server's private
-// `antigravity-acp/`. Entries are Claude-shaped — `command`/`args`/`env` for
-// stdio, `url` for remote (the loader keys off which of the two is present) —
-// and it tolerates both `{"mcpServers": {...}}` and a bare top-level map;
-// codeg always writes the explicit `mcpServers` wrapper.
+// Native agy shares this global config with other Antigravity surfaces.
+// Entries use command/args/env for stdio and url for remote servers; Codeg
+// writes the explicit mcpServers wrapper and also reads the legacy bare map.
 //
-// Antigravity therefore sits ON the ACP forward skip list in `connection.rs`
-// (with Hermes/Kimi/Grok/Cursor/Qoder). The server would in fact MERGE the two
-// sources by name with the wire winning, so a double-mount is not possible —
-// but defining the same server twice is still noise, and the built-in
-// `codeg-mcp` companion is injected separately by `inject_codeg_mcp`, so
-// delegation keeps working either way.
+// Native agy reads global servers itself, so ACP forwarding skips this agent.
+// The codeg-mcp companion is injected separately for delegation.
 // ---------------------------------------------------------------------------
 
 fn antigravity_mcp_config_path() -> PathBuf {

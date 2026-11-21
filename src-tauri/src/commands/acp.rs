@@ -9533,8 +9533,8 @@ pub(crate) fn agent_system_instructions_path(agent_type: AgentType) -> Option<Pa
         AgentType::Gemini => {
             Some(crate::parsers::gemini::resolve_gemini_base_dir().join("GEMINI.md"))
         }
-        // Global customizations belong to the native CLI, not Gemini CLI.
-        AgentType::Antigravity => Some(crate::parsers::antigravity::resolve_antigravity_cli_dir().join("AGENTS.md")),
+        // Keep the existing global rules path, which native agy also reads.
+        AgentType::Antigravity => Some(home_dir_or_default().join(".gemini").join("AGENTS.md")),
         AgentType::OpenCode => Some(
             crate::acp::opencode_config::config_dir()
                 .unwrap_or_else(|| home_dir_or_default().join(".config").join("opencode"))
@@ -10092,13 +10092,13 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
                 ".agents/skills",
             ],
         }),
-        // Install into the native CLI customization root; retain the shared
-        // Gemini root as a secondary discovery source for existing skills.
+        // Native agy reads the same shared skill root as the legacy server.
+        // Keep installs there so existing Antigravity surfaces stay aligned.
         AgentType::Antigravity => Some(SkillStorageSpec {
             kind: SkillStorageKind::SkillDirectoryOnly,
             global_dirs: vec![
-                crate::parsers::antigravity::resolve_antigravity_cli_dir().join("skills"),
                 crate::parsers::antigravity::resolve_antigravity_shared_config_dir().join("skills"),
+                crate::parsers::antigravity::resolve_antigravity_cli_dir().join("skills"),
             ],
             project_rel_dirs: vec![".gemini/skills", ".agents/skills"],
         }),
@@ -24731,7 +24731,7 @@ model = "gpt"
             assert_eq!(file_name(agent).as_deref(), Some("AGENTS.md"), "{agent:?}");
         }
         let antigravity = agent_system_instructions_path(AgentType::Antigravity).unwrap();
-        assert!(antigravity.ends_with(".gemini/antigravity-cli/AGENTS.md"));
+        assert!(antigravity.ends_with(".gemini/AGENTS.md"));
         let kiro = agent_system_instructions_path(AgentType::Kiro).unwrap();
         assert!(kiro.ends_with("steering/AGENTS.md"));
         let cline = agent_system_instructions_path(AgentType::Cline).unwrap();
