@@ -10,10 +10,7 @@ import {
   isUnsupportedModelError,
   persistentFallbackAction,
 } from "./retry.mjs"
-import {
-  patchModelNotFoundRetry,
-  transformGeminiModule,
-} from "./loader.mjs"
+import { patchModelNotFoundRetry, transformGeminiModule } from "./loader.mjs"
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "codeg-gemini-retry-"))
 after(() => fs.rmSync(temporary, { recursive: true, force: true }))
@@ -188,7 +185,10 @@ function assertBounded(result) {
   assert.equal(result.notFoundLoop.name, "ModelNotFoundError")
   assert.match(result.notFoundLoop.toolMessage, /gemini-3-flash-preview/)
   assert.match(result.notFoundLoop.toolMessage, /is not found/)
-  assert.match(result.notFoundLoop.toolMessage, /WEB_SEARCH_FAILED|Error during web search/)
+  assert.match(
+    result.notFoundLoop.toolMessage,
+    /WEB_SEARCH_FAILED|Error during web search/
+  )
 
   assert.equal(result.notFoundSwitch.value, "ok")
   assert.equal(result.notFoundSwitch.calls, 2)
@@ -247,7 +247,10 @@ test("unsupported model errors are capped and quota or 5xx are not", () => {
   assert.equal(isUnsupportedModelError({ code: "404" }), true)
   assert.equal(persistentFallbackAction(missing, 0), "continue-once")
   assert.equal(persistentFallbackAction(missing, 1), "stop")
-  assert.equal(persistentFallbackAction({ status: 404 }, undefined), "continue-once")
+  assert.equal(
+    persistentFallbackAction({ status: 404 }, undefined),
+    "continue-once"
+  )
 
   for (const error of [
     null,
@@ -275,11 +278,15 @@ test("flash fallback is rewritten once and the 5xx fallback is left in place", (
   const flash = once.source.indexOf('"Fallback to Flash model failed:"')
   const model = once.source.indexOf('"Model fallback failed:"')
   assert.equal(
-    once.source.slice(flash - 700, flash).includes("codegPersistentFallbackAction"),
+    once.source
+      .slice(flash - 700, flash)
+      .includes("codegPersistentFallbackAction"),
     true
   )
   assert.equal(
-    once.source.slice(model - 700, model).includes("codegPersistentFallbackAction"),
+    once.source
+      .slice(model - 700, model)
+      .includes("codegPersistentFallbackAction"),
     false
   )
   const twice = patchModelNotFoundRetry(once.source)
@@ -332,7 +339,9 @@ async function retryWithBackoff(fn3, options) {
   const model = patched.source.indexOf('"Model fallback failed:"')
   const serverBranch = patched.source.lastIndexOf("if (onPersistent429)", model)
   assert.equal(
-    patched.source.slice(serverBranch, model).includes("codegPersistentFallbackAction"),
+    patched.source
+      .slice(serverBranch, model)
+      .includes("codegPersistentFallbackAction"),
     false
   )
   assert.equal(
@@ -341,10 +350,14 @@ async function retryWithBackoff(fn3, options) {
   )
   const flash = patched.source.indexOf('"Fallback to Flash model failed:"')
   assert.equal(
-    patched.source.slice(0, flash).split("codegPersistentFallbackAction").length - 1,
+    patched.source.slice(0, flash).split("codegPersistentFallbackAction")
+      .length - 1,
     1
   )
-  assert.equal(patched.source.slice(flash).includes("codegPersistentFallbackAction"), false)
+  assert.equal(
+    patched.source.slice(flash).includes("codegPersistentFallbackAction"),
+    false
+  )
 })
 
 test("unpatched ModelNotFound resets forever; the patch returns a tool error", async () => {
@@ -419,11 +432,15 @@ test(
       const flash = patched.source.indexOf('"Fallback to Flash model failed:"')
       const model = patched.source.indexOf('"Model fallback failed:"')
       assert.equal(
-        patched.source.slice(flash - 900, flash).includes("codegPersistentFallbackAction"),
+        patched.source
+          .slice(flash - 900, flash)
+          .includes("codegPersistentFallbackAction"),
         true
       )
       assert.equal(
-        patched.source.slice(model - 900, model).includes("codegPersistentFallbackAction"),
+        patched.source
+          .slice(model - 900, model)
+          .includes("codegPersistentFallbackAction"),
         false
       )
     }
@@ -435,7 +452,10 @@ test(
       JSON.stringify({ type: "module" })
     )
     const output = path.join(checked, "chunk.js")
-    fs.writeFileSync(output, transformGeminiModule(fs.readFileSync(entry, "utf8")).source)
+    fs.writeFileSync(
+      output,
+      transformGeminiModule(fs.readFileSync(entry, "utf8")).source
+    )
     const syntax = spawnSync(process.execPath, ["--check", output], {
       encoding: "utf8",
       timeout: 60000,
