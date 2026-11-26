@@ -21,6 +21,22 @@ Gemini 原生 `read_file` 在构建工具调用时检查路径，早于 `BeforeT
   staging 是副本，修改副本不会写回原文件。正常退出清理 staging；非正常退出
   后由原生项目临时目录保留策略处理。
 
+## 不支持模型时停止空转
+
+`google_web_search` 调用 `GeminiClient.generateContent({ model: "web-search" })`。
+该别名固定解析到 `gemini-3-flash-preview`，并且这条 utility 路径总会装上
+`onPersistent429`。上游对 preview 返回 404 时，错误被分成 `ModelNotFoundError`，
+`handleFallback` 的 `retry_always` 在 active model 已经是 fallback 时不会改掉
+utility 的请求模型，然后 `attempt = 0; continue` 且没有 delay。
+
+Loader 只改写 `retryWithBackoff` 里警告为 `Fallback to Flash model failed` 的分支。
+ModelNotFound / HTTP 404 最多允许一次继续，用来尝试真正的模型切换；下一次仍不支持
+则抛出原错误，web search 收成工具错误。带退避的 429 / 5xx，以及耗尽后的
+`Model fallback failed` 分支不改。策略在 `retry.mjs`，不改 Gemini 安装文件。
+
+上游若改掉该警告字符串或 `retryWithBackoff` 声明，补丁失败开，紧循环可能再现。
+升级 Gemini 后必须跑下方测试。本机安装了官方 CLI 时，测试会核对 bundle。
+
 ## 验证与维护
 
 要求 Node >= 20.6（`module.register` 最低版本），CI 使用 Node 22。
@@ -30,7 +46,8 @@ bundle 上离线验证原生 Config、Storage、ReadFileTool 的 PNG 完整读�
 此入口依赖上游类声明形态；升级 Gemini 时须运行原生探针，声明改名可能使转换不再命中。
 
 ```sh
-node --test src-tauri/src/acp/gemini_compat/artifacts.test.mjs
+node --test src-tauri/src/acp/gemini_compat/artifacts.test.mjs \
+  src-tauri/src/acp/gemini_compat/retry-fallback.test.mjs
 cd src-tauri
 cargo test --no-default-features --features server-bin --lib gemini
 ```
