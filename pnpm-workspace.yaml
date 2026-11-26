@@ -7,10 +7,13 @@ overrides:
   # ansi-to-react (latest 6.2.6) still declares ^3, which has quadratic scans
   # in match(); the factory/tlds() API it calls is unchanged in 5.x.
   ansi-to-react>linkify-it: ^5.0.2
+  # Keep the React Compiler eslint rules that ship in 7.1+ out of this
+  # security bump; they fail ~200 existing effect sites under lint.
+  eslint-plugin-react-hooks: 7.0.1
 
 allowBuilds:
-  "@parcel/watcher": true
-  "@swc/core": true
+  '@parcel/watcher': true
+  '@swc/core': true
   esbuild: true
   msw: true
   sharp: true
