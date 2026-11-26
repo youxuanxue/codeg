@@ -1,18 +1,23 @@
-//! Launch-scoped compatibility for Gemini's native temporary-artifact reads.
+//! Launch-scoped compatibility for Gemini's native temporary-artifact reads
+//! and for unsupported-model fallback loops.
 //!
 //! Gemini validates `read_file` before ACP fs calls and BeforeTool hooks. A
 //! Node loader wraps that validator in memory, stages rejected OS-temp files
 //! into Storage's own project temp directory, then runs the original validator.
+//! The same loader bounds `retryWithBackoff`: a ModelNotFound / 404 may switch
+//! models once, and the next unsupported-model failure is thrown instead of
+//! resetting the attempt counter with no delay. Quota and 5xx retries stay.
 //! No workspace permission, installed CLI file or global setting is changed.
 
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-const SOURCES: [(&str, &str); 3] = [
+const SOURCES: [(&str, &str); 4] = [
     ("register.mjs", include_str!("gemini_compat/register.mjs")),
     ("loader.mjs", include_str!("gemini_compat/loader.mjs")),
     ("artifacts.mjs", include_str!("gemini_compat/artifacts.mjs")),
+    ("retry.mjs", include_str!("gemini_compat/retry.mjs")),
 ];
 
 pub const TEMP_CONTRACT: &str =
@@ -111,12 +116,11 @@ mod tests {
 
     #[test]
     fn native_artifact_regressions() {
+        let compat = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/acp/gemini_compat");
         let output = Command::new("node")
             .arg("--test")
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("src/acp/gemini_compat/artifacts.test.mjs"),
-            )
+            .arg(compat.join("artifacts.test.mjs"))
+            .arg(compat.join("retry-fallback.test.mjs"))
             .output()
             .unwrap();
         assert!(
